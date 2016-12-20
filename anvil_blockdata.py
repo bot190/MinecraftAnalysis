@@ -60,7 +60,7 @@ def chunklayer(blocks, data, add, yoffset):
 	blocks = blocks[yoffset*256:(yoffset+1)*256]
 	data = array_4bit_to_byte(data[yoffset*128:(yoffset+1)*128])
 	if add is not None:
-		add = array_4bit_to_byte(add[yoffset*128:(yoffset+1)*128])
+		add = 	(add[yoffset*128:(yoffset+1)*128])
 		for i,v in enumerate(add):
 			Allblocks[i] = (blocks[i] + 256*v)
 	else:
