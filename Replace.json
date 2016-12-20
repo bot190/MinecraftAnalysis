@@ -4,5 +4,39 @@
 		    "toID": 5,
 		    "toData": 3
 	    }
+    },
+    "5": {
+        "1": {
+            "toID": 17,
+            "toData": 1 
+        },
+        "2": {
+            "toID": 17,
+            "toData": 2
+        },
+        "3": {
+            "toID": 17,
+            "toData":3
+        }
+    },
+    "166": {
+        "*": {
+            "match1": {
+                "fromNBT": {
+                    "pipeId": 4307
+                },
+                "toNBT": {
+                    "pipeID": 4308
+                }
+            },
+            "match2": {
+                "fromNBT": {
+                    "pipeID": 4310
+                },
+                "toNBT": {
+                    "pipeID": 4311
+                }
+            }
+        }
     }
 }

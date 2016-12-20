@@ -9,6 +9,7 @@ Need to do this in a way that they can be compared, and only added if unique.
 """
 import os, sys
 import itertools
+from nbt.nbt import TAG_List, TAG_Long, TAG_Byte, TAG_Byte_Array, TAG_Int
 
 # local module
 try:
@@ -33,7 +34,7 @@ def process_region(region_file):
 	# Iterate through chunks in this region file and process them
 	region_data = []
 	for chunk in region.iter_chunks():
-		level = unpack_nbt(chunk["Level"])
+		level = chunk["Level"]
 		tile_data = defaultdict(lambda: defaultdict(dict))
 		chunk_modified = False
 		for tile_entity in level["TileEntities"]:
@@ -42,7 +43,7 @@ def process_region(region_file):
 			except KeyError:
 				pass
 		for ySec,section in enumerate(level["Sections"]):
-			blocks = list(section["Blocks"])
+			blocks = list(unpack_nbt(section["Blocks"]))
 			data = array_4bit_to_byte(section["Data"])
 			try:
 				add = array_4bit_to_byte(section['Add'])
@@ -56,8 +57,8 @@ def process_region(region_file):
 				z = (i - (y*256)) // 16
 				x = (i - (y*256) - (z*16))
 				y += ySec*16
-				z += level["zPos"]*16
-				x += level["xPos"]*16
+				z += level["zPos"].value*16
+				x += level["xPos"].value*16
 				try:
 					id = tile_data[x][y][z][0]
 					stripped_tags = tile_data[x][y][z][1]
@@ -77,34 +78,49 @@ def process_region(region_file):
 					if str(blocks[i]) in replacements:
 						# Block ID matched, lets check data
 						block_id = str(blocks[i])
-						if str(data[i]) in replacements[block_id]:
+						# Match Data value, or match always if wildcard present, 
+						if (str(data[i]) in replacements[block_id]) or ("*" in replacements[block_id]):
 							chunk_modified = True
 							block_data = str(data[i])
 							# todo: Data matched, check any NBT if it exists
-							blocks[i] = replacements[block_id][block_data]["toID"]
-							data[i] = replacements[block_id][block_data]["toData"]
+							try:
+								# If toID is omitted then no change is made
+								blocks[i] = replacements[block_id][block_data]["toID"]
+							except:
+								pass
+							try:
+								# If toData is omitted then no change is made  
+								data[i] = replacements[block_id][block_data]["toData"]
+							except:
+								pass
 							print("Changing: {0} TO {1}".format(block_id, replacements[block_id][block_data]["toID"]))
 				except NameError:
 					pass
 				# If changes were made, update level variable for writing back to file
-				if chunk_modified:					
-					add = [0] * 4096
-					for i,v in enumerate(blocks):
-						if blocks[i] > 255:
-							add[i] = blocks[i]//256
-							blocks[i] -= add[i] * 256
-					level["Sections"][ySec]["Add"] = array_byte_to_4bit(bytearray(add))
-					level["Sections"][ySec]["Blocks"] = bytearray(blocks)
-					level["Sections"][ySec]["Data"] = array_byte_to_4bit(data)
+			if chunk_modified:
+				add = [0] * 4096
+				for i,v in enumerate(blocks):
+					if blocks[i] > 255:
+						add[i] = blocks[i]//256
+						blocks[i] -= add[i] * 256
+				add = array_byte_to_4bit(bytearray(add))
+				add_list = TAG_Byte_Array(name=unicode("Add"))
+				add_list.value = add
+				level["Sections"][ySec]["Add"] = add_list
+				blocks = bytearray(blocks)
+				block_list =TAG_Byte_Array(name=unicode("Blocks"))
+				block_list.value = blocks
+				level["Sections"][ySec]["Blocks"] = block_list
+				data_list =TAG_Byte_Array(name=unicode("Data"))
+				data = array_byte_to_4bit(bytearray(data))
+				data_list.value = data
+				level["Sections"][ySec]["Data"] = data_list
 		try:
 			replacements
 			if chunk_modified:
-				# Make add array if necessary
-				# Get NBT form of arrays
-				chunk["Level"] = pack_nbt(level)
 				# Write out updated chunk
-				print("Writing new data")
-				region.write_chunk(abs(level["xPos"]), abs(level["zPos"]), chunk)
+				print("Writing new data {0},{1}".format(level["xPos"].value%32, level["zPos"].value%32))
+				region.write_chunk(level["xPos"].value%32, level["zPos"].value%32, chunk)
 		except NameError as e:
 			print("Error finding: {0}".format(e))
 			pass
