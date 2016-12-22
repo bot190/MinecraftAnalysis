@@ -38,6 +38,8 @@ def unpack_nbt(tag):
         return [unpack_nbt(i) for i in tag.tags]
     elif isinstance(tag, TAG_Compound):
         return dict((i.name, unpack_nbt(i)) for i in tag.tags)
+    elif tag is None:
+        return None
     else:
         return tag.value
     
@@ -62,6 +64,8 @@ def pack_nbt(s):
     """
 
     if isinstance(s, int):
+        return TAG_Int(s)
+    if isinstance(s, long):
         return TAG_Long(s)
     elif isinstance(s, float):
         return TAG_Double(s)

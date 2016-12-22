@@ -1,22 +1,22 @@
 {
     "79": {
         "0": {
-		    "toID": 5,
-		    "toData": 3
-	    }
+            "toID": 5,
+            "toData": 4
+        }
     },
-    "5": {
+    "17": {
         "1": {
-            "toID": 17,
-            "toData": 1 
+            "toID": 5,
+            "toData": 1
         },
         "2": {
-            "toID": 17,
+            "toID": 5,
             "toData": 2
         },
         "3": {
-            "toID": 17,
-            "toData":3
+            "toID": 5,
+            "toData": 3
         }
     },
     "166": {
@@ -26,15 +26,16 @@
                     "pipeId": 4307
                 },
                 "toNBT": {
-                    "pipeID": 4308
+                    "pipeId": 4308
                 }
             },
             "match2": {
                 "fromNBT": {
-                    "pipeID": 4310
+                    "pipeId": 4310
                 },
                 "toNBT": {
-                    "pipeID": 4311
+                    "pipeId": 4311,
+                    "items": []
                 }
             }
         }

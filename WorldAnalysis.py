@@ -9,7 +9,8 @@ Need to do this in a way that they can be compared, and only added if unique.
 """
 import os, sys
 import itertools
-from nbt.nbt import TAG_List, TAG_Long, TAG_Byte, TAG_Byte_Array, TAG_Int
+from nbt.nbt import TAG_List, TAG_Long, TAG_Byte, TAG_Byte_Array, TAG_Int,\
+	TAG_Compound
 
 # local module
 try:
@@ -37,11 +38,15 @@ def process_region(region_file):
 		level = chunk["Level"]
 		tile_data = defaultdict(lambda: defaultdict(dict))
 		chunk_modified = False
+		tile_entity_modified = False
 		for tile_entity in level["TileEntities"]:
-			try:
-				tile_data[tile_entity["x"]][tile_entity["y"]][tile_entity["z"]] = (tile_entity["id"], tile_entity)
-			except KeyError:
-				pass
+			# defaultdict(lambda: defaultdict(dict)) was supposed to handle 
+			# this, but it causes some major weirdness, so doing it by hand
+			x = tile_entity["x"].value
+			y = tile_entity["y"].value
+			z = tile_entity["z"].value
+			# Rethink this.. really don't need the id separately since it's included, also should revert to the above defaultdict with x,y,z as above
+			tile_data[x][y][z] = tile_entity
 		for ySec,section in enumerate(level["Sections"]):
 			blocks = list(unpack_nbt(section["Blocks"]))
 			data = array_4bit_to_byte(section["Data"])
@@ -60,8 +65,8 @@ def process_region(region_file):
 				z += level["zPos"].value*16
 				x += level["xPos"].value*16
 				try:
-					id = tile_data[x][y][z][0]
-					stripped_tags = tile_data[x][y][z][1]
+					id = tile_data[x][y][z]['ID']
+					stripped_tags = tile_data[x][y][z]
 					for tag in tags_to_strip:
 						stripped_tags.pop(tag,None)
 					block = (blocks[i], data[i], id, stripped_tags)
@@ -78,22 +83,53 @@ def process_region(region_file):
 					if str(blocks[i]) in replacements:
 						# Block ID matched, lets check data
 						block_id = str(blocks[i])
-						# Match Data value, or match always if wildcard present, 
-						if (str(data[i]) in replacements[block_id]) or ("*" in replacements[block_id]):
-							chunk_modified = True
+						# Match Data value, or match always if wildcard present,
+						if (str(data[i]) in replacements[block_id]):
 							block_data = str(data[i])
-							# todo: Data matched, check any NBT if it exists
-							try:
-								# If toID is omitted then no change is made
-								blocks[i] = replacements[block_id][block_data]["toID"]
-							except:
-								pass
-							try:
-								# If toData is omitted then no change is made  
-								data[i] = replacements[block_id][block_data]["toData"]
-							except:
-								pass
-							print("Changing: {0} TO {1}".format(block_id, replacements[block_id][block_data]["toID"]))
+						elif ("*" in replacements[block_id]):
+							block_data = unicode("*")
+						else:
+							block_data = ""
+						if block_data != "":
+							matched=True
+							# Iterate through any declared NBT matches, first succesful match will be applied
+							for key,value in replacements[block_id][block_data].viewitems():
+								matched = True
+								if key == "toID" or key == "toData":
+									break
+								if "fromNBT" in value and ( x in tile_data and y in tile_data[x] and z in tile_data[x][y]):
+									# Pattern definitely given
+									for tag,tag_data in value['fromNBT'].viewitems():
+										# Check for tag, data pair in the tile-data
+										if tag in tile_data[x][y][z]:
+											if (tile_data[x][y][z][tag].value != tag_data):
+												matched = False
+												break
+										else:
+											matched = False
+											break
+								if matched and "toNBT" in value:
+									print("NBT Matched")
+									chunk_modified = True
+									tile_entity_modified = True
+									# this pattern matched, lets make the changes specified, and be on our merry way
+									for tag,tag_data in value["toNBT"].viewitems():
+										tile_data[x][y][z][tag] = pack_nbt(tag_data)
+									break
+							if matched:
+								try:
+									# If toID is omitted then no change is made
+									blocks[i] = replacements[block_id][block_data]["toID"]
+									chunk_modified = True
+								except:
+									pass
+								try:
+									# If toData is omitted then no change is made  
+									data[i] = replacements[block_id][block_data]["toData"]
+									print("Changing: {0} TO {1}".format(block_id, replacements[block_id][block_data]["toID"]))
+									chunk_modified = True
+								except:
+									pass
 				except NameError:
 					pass
 				# If changes were made, update level variable for writing back to file
@@ -103,18 +139,23 @@ def process_region(region_file):
 					if blocks[i] > 255:
 						add[i] = blocks[i]//256
 						blocks[i] -= add[i] * 256
-				add = array_byte_to_4bit(bytearray(add))
 				add_list = TAG_Byte_Array(name=unicode("Add"))
-				add_list.value = add
+				add_list.value = array_byte_to_4bit(bytearray(add))
 				level["Sections"][ySec]["Add"] = add_list
-				blocks = bytearray(blocks)
 				block_list =TAG_Byte_Array(name=unicode("Blocks"))
-				block_list.value = blocks
+				block_list.value = bytearray(blocks)
 				level["Sections"][ySec]["Blocks"] = block_list
 				data_list =TAG_Byte_Array(name=unicode("Data"))
-				data = array_byte_to_4bit(bytearray(data))
-				data_list.value = data
+				data_list.value = array_byte_to_4bit(bytearray(data))
 				level["Sections"][ySec]["Data"] = data_list
+		if tile_entity_modified:
+			#flatten tile_data back into a TAG_List
+			tile_entities = TAG_List(type=TAG_Compound)
+			for x,value_x in tile_data.viewitems():
+				for y,value_y in value_x.viewitems():
+					for z,tile in value_y.viewitems():
+						tile_entities.append(tile)
+			level["TileEntities"] = tile_entities
 		try:
 			replacements
 			if chunk_modified:
@@ -156,7 +197,7 @@ def main(world_folder, replacement_file_name):
 	out_file = open("output.txt", "w+")
 	for block in world_data:
 		#print("Block: {0}:{1} ID: {2} Data: {3}".format(block[0],block[1], block[2], json.dumps(block[3], default=to_json)))
-		out_file.write("Block: {0}:{1} ID: {2} Data: {3}\n".format(block[0],block[1], block[2], json.dumps(block[3], default=to_json)))
+		out_file.write("Block: {0}:{1} ID: {2} Data: {3}\n".format(block[0],block[1], block[2], json.dumps(unpack_nbt(block[3]), default=to_json)))
 	out_file.close()
 	return 0
 
