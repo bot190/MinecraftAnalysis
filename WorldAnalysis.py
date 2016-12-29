@@ -45,7 +45,6 @@ def process_region(region_file):
 			x = tile_entity["x"].value
 			y = tile_entity["y"].value
 			z = tile_entity["z"].value
-			# Rethink this.. really don't need the id separately since it's included, also should revert to the above defaultdict with x,y,z as above
 			tile_data[x][y][z] = tile_entity
 		for ySec,section in enumerate(level["Sections"]):
 			blocks = list(unpack_nbt(section["Blocks"]))
@@ -66,10 +65,11 @@ def process_region(region_file):
 				x += level["xPos"].value*16
 				try:
 					id = tile_data[x][y][z]['id']
-					stripped_tags = tile_data[x][y][z]
+					stripped_tags =unpack_nbt(tile_data[x][y][z])
 					for tag in tags_to_strip:
 						stripped_tags.pop(tag,None)
-					block = (blocks[i], data[i], id, json.dumps(unpack_nbt(stripped_tags), default=to_json))
+				 	stripped_tags = json.dumps(stripped_tags, default=to_json)
+					block = (blocks[i], data[i], id, stripped_tags)
 				except KeyError:
 					block = (blocks[i], data[i], None, None)
 				try:
@@ -97,6 +97,8 @@ def process_region(region_file):
 								matched = True
 								if key == "toID" or key == "toData":
 									break
+								elif key == "title" or key == "delete":
+									continue
 								if "fromNBT" in value and ( x in tile_data and y in tile_data[x] and z in tile_data[x][y]):
 									# Pattern definitely given
 									for tag,tag_data in value['fromNBT'].viewitems():
@@ -110,7 +112,7 @@ def process_region(region_file):
 											break
 								if matched:
 									try:
-										title = replacements[block_id][block_data]["title"]
+										title = replacements[block_id][block_data][key]["title"]
 									except:
 										title = "{}:{}".format(block_id, block_data)
 									try:
@@ -135,6 +137,16 @@ def process_region(region_file):
 											tile_data[x][y][z][tag] = pack_nbt(tag_data)
 										print("Changing NBT-NBT: {}".format(title))
 										break
+									elif "delete" in value:
+										try:
+											# If delete property specified, try to remove the tile entity
+											if (tile_data[x][y].pop(z,None) != None):
+												print("Deleted Tile Data: {}".format(title))
+												chunk_modified = True
+												tile_entity_modified = True
+										except:
+											# Block didn't have a tile entity attached
+											pass
 							if not title:
 								try:
 									title = replacements[block_id][block_data]["title"]
@@ -154,6 +166,16 @@ def process_region(region_file):
 								print("Changing Data: {}".format(title))
 								chunk_modified = True
 							except:
+								pass
+							try:
+								# If delete property specified, try to remove the tile entity
+								replacements[block_id][block_data]["delete"]
+								tile_data[x][y].pop(z,None)
+								print("Deleted Tile Data: {}".format(title))
+								tile_entity_modified = True
+								chunk_modified = True
+							except:
+								# Block didn't have a tile entity attached
 								pass
 				except NameError:
 					pass
@@ -205,10 +227,10 @@ def main(world_folder, replacement_file_name):
 	region_files = world.get_regionfiles();
 	
 	# Parallel
-	p = Pool(processes=8)
-	region_data = p.map(process_region, region_files)
+	#p = Pool(processes=8)
+	#region_data = p.map(process_region, region_files)
 	# Not Parallel
-# 	region_data = map(process_region, region_files)
+	region_data = map(process_region, region_files)
 	
 	# initialize with data from first region
 	world_data = region_data[0]

@@ -8,301 +8,363 @@
     "250": {
         "14": {
             "title": "Mass Fabricator",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "13": {
             "title": "Induction Furnace",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "11": {
             "title": "Recycler",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "8": {
             "title": "Pump",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "7": {
             "title": "Miner",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "6": {
             "title": "Canning Machine",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "5": {
             "title": "Compressor",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "Extractor",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "3": {
             "title": "Macerator",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "Electric Furnace",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "249": {
         "0": {
             "title": "Copper Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "248": {
         "0": {
             "title": "Tin Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "247": {
         "0": {
             "title": "Uranium Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "246": {
         "5": {
             "title": "Nuclear Reactor",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "Wind Mill",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "3": {
             "title": "Solar Panel",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "Water Mill",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "Geothermal Generator",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "0": {
             "title": "Generator",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "245": {
         "0": {
             "title": "Mining Pipe",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "244": {
         "0": {
             "title": "Mining Pipe Block",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "243": {
         "*": {
             "title": "Rubber Wood",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "242": {
         "*": {
             "title": "Rubber Tree Leaves",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "241": {
         "*": {
             "title": "Rubber Tree Sapling",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "233": {
         "0": {
             "title": "Reactor Chamber",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "232": {
         "0": {
             "title": "Iron Fence",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "231": {
         "0": {
             "title": "Reinforced Stone",
-            "toID": 49
+            "toID": 49,
+            "delete": true
         }
     },
     "230": {
         "0": {
             "title": "Reinforced Glass",
-            "toID": 20
+            "toID": 20,
+            "delete": true
         }
     },
     "229": {
         "*": {
             "title": "UNKNOWN",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "228": {
         "12": {
             "title": "SplitterCable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "11": {
             "title": "Detector Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "10": {
             "title": "Ultra-Low-Current Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "9": {
             "title": "Glass Fibre Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "8": {
             "title": "4xIns. HV Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "7": {
             "title": "2xIns. HV Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "6": {
             "title": "Insulated HV Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "5": {
             "title": "HV Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "2xIns. Gold Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "3": {
             "title": "Insulated HV Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "Gold Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "Uninsulated Copper Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "0": {
             "title": "Copper Cable",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "227": {
         "5": {
             "title": "HV-Transformer",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "MV-Transformer",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "3": {
             "title": "LV-Transformer",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "MFSU",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "MFE",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "0": {
             "title": "BatBox",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "225": {
         "0": {
             "title": "Personal Safe",
-            "toID": 54
+            "toID": 54,
+            "toData": 0
         }
     },
     "223": {
         "1": {
             "title": "Tesla Coil",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "0": {
             "title": "Teleporter",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "221": {
         "*": {
             "title": "UNKOWN",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "220": {
         "*": {
             "title": "Scaffold",
-            "toID": 5
+            "toID": 5,
+            "delete": true
         }
     },
     "219": {
         "1": {
             "title": "Luminator",
-            "toID": 123
+            "toID": 123,
+            "delete": true
         }
     },
     "216": {
         "*" : {
             "title": "Turtle",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "214": {
         "3": {
             "title": "Infernal Brick",
-            "toID": 112
+            "toID": 112,
+            "delete": true
         },
         "2": {
             "title": "Block of Steel",
-            "toID": 42
+            "toID": 42,
+            "delete": true
         },
         "1": {
             "title": "Block of Concrete",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "0": {
             "title": "Chunk Loader",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "213": {
         "12": {
             "title": "Blast Furnace Brick",
-            "toID": 112
+            "toID": 112,
+            "delete": true
         },
         "6": {
             "title": "Cart Dispenser",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "212": {
         "0": {
             "title": "Iron Post",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "1": {
             "title": "Dual-Head Block Signal",
@@ -311,25 +373,30 @@
         },
         "3": {
             "title": "Block Signal",
-            "toID": 124
+            "toID": 124,
+            "delete": true
         },
         "6": {
             "title": "Stone Post",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "211": {
         "0": {
             "title": "Detector - Storage",
-            "toID": 1
+            "toID": 1,
+            "delete": true
 		},
         "2": {
             "title": "Detector - Empty",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "5": {
             "title": "Detector - Player",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "209": {
@@ -340,7 +407,7 @@
                 },
                 "toID": 27
             },
-            "RCSpeedrailTile": {
+            "RCSpeedRailTile": {
                 "fromNBT": {
                     "id": "RCSpeedRailTile"
                 },
@@ -369,7 +436,8 @@
                     "id": "RCGatedOneWayRailTile"
                 },
                 "toID": 66
-            }  
+            },
+            "delete": true
         }
     },
     "208": {
@@ -391,7 +459,8 @@
                     "id": "diskdrive"
                 },
                 "toID": 0
-            }
+            },
+            "delete": true
         }
     },
     "207": {
@@ -401,143 +470,171 @@
                     "id": "computer"
                 },
                 "toID": 0
-            }
+            },
+            "delete": true
         }
     },
     "205": {
         "0": {
             "title": "Fermenter",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "Bio Power Generator",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "5": {
             "title": "Carpenter",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "6": {
             "title": "Moistener",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "7": {
             "title": "Apiary",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "8": {
             "title": "Centrifuge",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "204": {
         "2": {
             "title": "Electrical Engine",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "203": {
         "*": {
             "title": "Old Farms",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "201": {
         "*": {
             "title": "Old Planter",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "199": {
         "1": {
             "title": "Forest Hive",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "Meadows Hive",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "3": {
             "title": "Desert Hive",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "Jungle Hive",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "6": {
             "title": "Snow Hive",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "198": {
         "0": {
             "title": "Apatite Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "197": {
         "*": {
             "title": "Humus",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "183": {
         "0": {
             "title": "CompactSolarType.LV",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "CompactSolarType.MV",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "CompactSolarType.HV",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "180": {
         "*": {
             "title": "Interdiction Torch",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "179": {
         "0": {
             "title": "Alchemical Chest",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "Energy Condenser",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "177": {
         "0": {
             "title": "Energy Collector",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "7": {
             "title": "Antimatter Array MK3",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "171": {
         "0": {
             "title": "Mining Pipe",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "169": {
         "0": {
             "title": "Automatic Crafting Table",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "167": {
         "0": {
             "title": "Refinery",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "166": {
@@ -661,237 +758,284 @@
                     "pipeId": 4324
                 },
                 "toID": 0
-            }
+            },
+            "delete": true
         }
     },
     "165": {
         "0": {
             "title": "Tank", 
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "164": {
         "0": {
             "title": "Pump",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "163": {
         "*": {
             "title": "Oil",
-            "toID": 9
+            "toID": 9,
+            "delete": true
         }
     },
     "162": {
         "*": {
             "title": "Oil",
-            "toID": 9
+            "toID": 9,
+            "delete": true
         }
     },
     "161": {
         "0": {
             "title": "Redstone Engine",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "Steam Engine",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "Combustion Engine",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "160": {
         "0": {
             "title": "Frame",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "155": {
         "0": {
             "title": "Filler",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "154": {
         "*": {
             "title": "Marker",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "153": {
         "*": {
             "title": "Quarry",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "151": {
         "0": {
             "title": "RP - Solar Panel",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "150": {
         "0": {
             "title": "RP - Deployer",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "RP - Block Breaker",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "6": {
             "title": "RP - Battery Box",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "8": {
             "title": "RP - Retriever",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "12": {
             "title": "RP - Igniter",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "147": {
         "*": {
             "title": "Lamps",
             "toID": 124,
-            "toData": 0
+            "toData": 0,
+            "delete": true
         }
     },
     "146": {
         "*": {
             "title": "RP - Unknown",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "145": {
         "0": {
             "title": "Ruby Block",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "Emerald Block",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "2": {
             "title": "Sapphire Block",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "144": {
         "*": {
             "title": "RP - Unknown",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }    
     },
     "143": {
         "*": {
             "title": "RP - Rubberwood",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "142": {
         "0": {
             "title": "RP - Marble",
-            "toID": 155
+            "toID": 155,
+            "delete": true
         },
         "1": {
             "title": "RP - Basalt",
-            "toID": 87
+            "toID": 87,
+            "delete": true
         },
         "2": {
             "title": "RP - Marble Brick",
             "toID": 155,
-            "toData": 1
+            "toData": 1,
+            "delete": true
         },
         "3": {
             "title": "RP - Basalt Cobblestone",
-            "toID": 87
+            "toID": 87,
+            "delete": true
         },
         "4": {
             "title": "RP - Basalt Brick",
-            "toID": 112
+            "toID": 112,
+            "delete": true
         }
     },
     "141": {
         "*": {
             "title": "RP - Leaves",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "140": {
         "0": {
             "title": "RP - Ruby Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "1": {
             "title": "RP - Emerald Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "2": {
             "title": "RP - Sapphire Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "3": {
             "title": "RP - Silver Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "4": {
             "title": "RP - Tin Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "5": {
             "title": "RP - Copper Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "6": {
             "title": "RP - Tungsten Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         },
         "7": {
             "title": "RP - Nikolite Ore",
-            "toID": 1
+            "toID": 1,
+            "delete": true
         }
     },
     "139": {
         "0": {
             "title": "RP - Indigo Plant",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "RP - Rubber Sappling",
-            "toID": 0   
+            "toID": 0,
+            "delete": true
         }
     },
     "138": {
         "0": {
             "title": "RP - Timer",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "RP - Sequencer",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "137": {
         "0": {
             "title": "RP - Alloy Furnace",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "1": {
             "title": "RP - Blulectric Furnace",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "3": {
             "title": "RP - Project Table",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         },
         "4": {
             "title": "RP - Blulectric Alloy Furnace",
-            "toID": 0
+            "toID": 0,
+            "delete": true
         }
     },
     "136": {
@@ -937,7 +1081,8 @@
                     "id": "Covers"
                 },
                 "toID": 0
-            }
+            },
+            "delete": true
         }
     }
 }
