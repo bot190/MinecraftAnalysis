@@ -27,7 +27,7 @@ import json
 from utilities import array_4bit_to_byte, array_byte_to_4bit, unpack_nbt, pack_nbt, to_json
 
 # Default tags to remove, eventually make this loaded from a file
-tags_to_strip = ["id", "x", "y", "z", "Items"]
+tags_to_strip = ["id", "x", "y", "z", "Items", "facing"]
 replacements={}
 
 def process_region(region_file):
@@ -65,11 +65,11 @@ def process_region(region_file):
 				z += level["zPos"].value*16
 				x += level["xPos"].value*16
 				try:
-					id = tile_data[x][y][z]['ID']
+					id = tile_data[x][y][z]['id']
 					stripped_tags = tile_data[x][y][z]
 					for tag in tags_to_strip:
 						stripped_tags.pop(tag,None)
-					block = (blocks[i], data[i], id, stripped_tags)
+					block = (blocks[i], data[i], id, json.dumps(unpack_nbt(stripped_tags), default=to_json))
 				except KeyError:
 					block = (blocks[i], data[i], None, None)
 				try:
@@ -91,7 +91,7 @@ def process_region(region_file):
 						else:
 							block_data = ""
 						if block_data != "":
-							matched=True
+							title = None
 							# Iterate through any declared NBT matches, first succesful match will be applied
 							for key,value in replacements[block_id][block_data].viewitems():
 								matched = True
@@ -108,28 +108,53 @@ def process_region(region_file):
 										else:
 											matched = False
 											break
-								if matched and "toNBT" in value:
-									print("NBT Matched")
-									chunk_modified = True
-									tile_entity_modified = True
-									# this pattern matched, lets make the changes specified, and be on our merry way
-									for tag,tag_data in value["toNBT"].viewitems():
-										tile_data[x][y][z][tag] = pack_nbt(tag_data)
-									break
-							if matched:
+								if matched:
+									try:
+										title = replacements[block_id][block_data]["title"]
+									except:
+										title = "{}:{}".format(block_id, block_data)
+									try:
+										# If toID is omitted then no change is made
+										blocks[i] = value["toID"]
+										print("Changing NBT-ID: {}".format(title))
+										chunk_modified = True
+									except:
+										pass
+									try:
+										# If toData is omitted then no change is made  
+										data[i] = value["toData"]
+										print("Changing NBT-Data: {}".format(title))
+										chunk_modified = True
+									except:
+										pass
+									if "toNBT" in value:
+										chunk_modified = True
+										tile_entity_modified = True
+										# this pattern matched, lets make the changes specified, and be on our merry way
+										for tag,tag_data in value["toNBT"].viewitems():
+											tile_data[x][y][z][tag] = pack_nbt(tag_data)
+										print("Changing NBT-NBT: {}".format(title))
+										break
+							if not title:
 								try:
-									# If toID is omitted then no change is made
-									blocks[i] = replacements[block_id][block_data]["toID"]
-									chunk_modified = True
+									title = replacements[block_id][block_data]["title"]
 								except:
-									pass
-								try:
-									# If toData is omitted then no change is made  
-									data[i] = replacements[block_id][block_data]["toData"]
-									print("Changing: {0} TO {1}".format(block_id, replacements[block_id][block_data]["toID"]))
-									chunk_modified = True
-								except:
-									pass
+									title = "{}:{}".format(block_id, block_data)
+							# As long as block ID and Data have matched try this, WILL override NBT matches
+							try:
+								# If toID is omitted then no change is made
+								blocks[i] = replacements[block_id][block_data]["toID"]
+								print("Changing ID: {}".format(title))
+								chunk_modified = True
+							except:
+								pass
+							try:
+								# If toData is omitted then no change is made  
+								data[i] = replacements[block_id][block_data]["toData"]
+								print("Changing Data: {}".format(title))
+								chunk_modified = True
+							except:
+								pass
 				except NameError:
 					pass
 				# If changes were made, update level variable for writing back to file
@@ -180,10 +205,10 @@ def main(world_folder, replacement_file_name):
 	region_files = world.get_regionfiles();
 	
 	# Parallel
-	#p = Pool(processes=8)
-	#region_data = p.map(process_region, region_files)
+	p = Pool(processes=8)
+	region_data = p.map(process_region, region_files)
 	# Not Parallel
-	region_data = map(process_region, region_files)
+# 	region_data = map(process_region, region_files)
 	
 	# initialize with data from first region
 	world_data = region_data[0]
@@ -195,9 +220,10 @@ def main(world_folder, replacement_file_name):
 			except ValueError:
 				world_data.append(block)
 	out_file = open("output.txt", "w+")
+	out_file.write("Block ID,Data,NBT ID,NBT\n")
 	for block in world_data:
 		#print("Block: {0}:{1} ID: {2} Data: {3}".format(block[0],block[1], block[2], json.dumps(block[3], default=to_json)))
-		out_file.write("Block: {0}:{1} ID: {2} Data: {3}\n".format(block[0],block[1], block[2], json.dumps(unpack_nbt(block[3]), default=to_json)))
+		out_file.write("{0};{1};{2};{3}\n".format(block[0],block[1], block[2], block[3]))
 	out_file.close()
 	return 0
 
