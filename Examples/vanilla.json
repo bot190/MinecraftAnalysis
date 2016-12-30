@@ -281,9 +281,17 @@
     },
     "225": {
         "0": {
-            "title": "Personal Safe",
-            "toID": 54,
-            "toData": 0
+            "Personal Safe": {
+                "fromNBT": {
+                    "id": "Personal Safe"
+                },
+                "toNBT": {
+                    "id": "Chest"
+                },
+                "deleteNBT": ["owner", "facing"],
+	            "toID": 54,
+	            "toData": 3
+            }
         }
     },
     "223": {

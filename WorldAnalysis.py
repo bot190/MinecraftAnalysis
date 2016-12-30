@@ -9,8 +9,8 @@ Need to do this in a way that they can be compared, and only added if unique.
 """
 import os, sys
 import itertools
-from nbt.nbt import TAG_List, TAG_Long, TAG_Byte, TAG_Byte_Array, TAG_Int,\
-	TAG_Compound
+import logging
+from nbt.nbt import TAG_List, TAG_Long, TAG_Byte, TAG_Byte_Array, TAG_Int,TAG_Compound
 
 # local module
 try:
@@ -21,16 +21,31 @@ except ImportError:
 	if not os.path.exists(os.path.join(extrasearchpath,'nbt')):
 		raise
 	sys.path.append(extrasearchpath)
-from multiprocessing import Pool
+from multiprocessing import Pool,Queue
+import threading
 from collections import defaultdict
 import json
-from utilities import array_4bit_to_byte, array_byte_to_4bit, unpack_nbt, pack_nbt, to_json
+from utilities import array_4bit_to_byte, array_byte_to_4bit, unpack_nbt, pack_nbt, to_json, DelayedKeyboardInterrupt
+from QueueHandler import QueueHandler
 
 # Default tags to remove, eventually make this loaded from a file
 tags_to_strip = ["id", "x", "y", "z", "Items", "facing"]
 replacements={}
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+fh = logging.FileHandler(os.path.join(os.getcwd(), "replacements.log"))
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+fh.setFormatter(formatter)
+fh.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setFormatter(formatter)
+ch.setLevel(logging.INFO)
+logger.addHandler(fh)
+logger.addHandler(ch)
+
 def process_region(region_file):
+	replacements = process_region.replacements
 	region = nbt.region.RegionFile(region_file)
 	# Iterate through chunks in this region file and process them
 	region_data = []
@@ -97,7 +112,7 @@ def process_region(region_file):
 								matched = True
 								if key == "toID" or key == "toData":
 									break
-								elif key == "title" or key == "delete":
+								elif key == "title" or key == "delete" or key == "deleteNBT":
 									continue
 								if "fromNBT" in value and ( x in tile_data and y in tile_data[x] and z in tile_data[x][y]):
 									# Pattern definitely given
@@ -114,18 +129,18 @@ def process_region(region_file):
 									try:
 										title = replacements[block_id][block_data][key]["title"]
 									except:
-										title = "{}:{}".format(block_id, block_data)
+										title = key
 									try:
 										# If toID is omitted then no change is made
 										blocks[i] = value["toID"]
-										print("Changing NBT-ID: {}".format(title))
+										process_region.logger.debug("Changing NBT-ID: %s", title)
 										chunk_modified = True
 									except:
 										pass
 									try:
 										# If toData is omitted then no change is made  
 										data[i] = value["toData"]
-										print("Changing NBT-Data: {}".format(title))
+										process_region.logger.debug("Changing NBT-Data: %s", title)
 										chunk_modified = True
 									except:
 										pass
@@ -135,13 +150,21 @@ def process_region(region_file):
 										# this pattern matched, lets make the changes specified, and be on our merry way
 										for tag,tag_data in value["toNBT"].viewitems():
 											tile_data[x][y][z][tag] = pack_nbt(tag_data)
-										print("Changing NBT-NBT: {}".format(title))
-										break
+										process_region.logger.debug("Changing NBT-NBT: %s", title)
+									if "deleteNBT" in value:
+										for delTag in value["deleteNBT"]:
+											try:
+												if tile_data[x][y][z].pop(delTag,None) != None:
+													process_region.logger.debug("Deleted Tag %s from %s", delTag, title)
+													chunk_modified = True
+													tile_entity_modified = True
+											except:
+												pass
 									elif "delete" in value:
 										try:
 											# If delete property specified, try to remove the tile entity
 											if (tile_data[x][y].pop(z,None) != None):
-												print("Deleted Tile Data: {}".format(title))
+												process_region.logger.debug("Deleted Tile Data: %s",title)
 												chunk_modified = True
 												tile_entity_modified = True
 										except:
@@ -156,14 +179,14 @@ def process_region(region_file):
 							try:
 								# If toID is omitted then no change is made
 								blocks[i] = replacements[block_id][block_data]["toID"]
-								print("Changing ID: {}".format(title))
+								process_region.logger.debug("Changing ID: %s", title)
 								chunk_modified = True
 							except:
 								pass
 							try:
 								# If toData is omitted then no change is made  
 								data[i] = replacements[block_id][block_data]["toData"]
-								print("Changing Data: {}".format(title))
+								process_region.logger.debug("Changing Data: %s",title)
 								chunk_modified = True
 							except:
 								pass
@@ -171,7 +194,7 @@ def process_region(region_file):
 								# If delete property specified, try to remove the tile entity
 								replacements[block_id][block_data]["delete"]
 								tile_data[x][y].pop(z,None)
-								print("Deleted Tile Data: {}".format(title))
+								process_region.logger.debug("Deleted Tile Data: %s",title)
 								tile_entity_modified = True
 								chunk_modified = True
 							except:
@@ -207,30 +230,54 @@ def process_region(region_file):
 			replacements
 			if chunk_modified:
 				# Write out updated chunk
-				print("Writing new data {0},{1}".format(level["xPos"].value%32, level["zPos"].value%32))
-				region.write_chunk(level["xPos"].value%32, level["zPos"].value%32, chunk)
+				process_region.logger.info("Writing chunk data %d,%d to %s",level["xPos"].value%32, level["zPos"].value%32, region_file)
+				# Ensure that we don't interrupt a chunk write with SigInt.
+				with DelayedKeyboardInterrupt():
+					region.write_chunk(level["xPos"].value%32, level["zPos"].value%32, chunk)
 		except NameError as e:
 			print("Error finding: {0}".format(e))
 			pass
 	return region_data
 
+def process_init(q,Replace):
+	process_region.replacements = Replace
+	process_region.qh = QueueHandler(q)
+	process_region.logger = logging.getLogger(__name__)
+	process_region.logger.setLevel(logging.DEBUG)
+	process_region.logger.addHandler(process_region.qh)
+	
+def logger_thread(q):
+	logger = logging.getLogger(__name__)
+	while True:
+		record = q.get()
+		if record is None:
+			break
+		logger.handle(record)
+
 def main(world_folder, replacement_file_name):
 	global replacements
 	world = nbt.world.WorldFolder(world_folder)
+	logger.info("Starting processing of %s", world_folder)
 	if not isinstance(world, nbt.world.AnvilWorldFolder):
-		print("%s is not an Anvil world" % (world_folder))
+		logger.error("%s is not an Anvil world" % (world_folder))
 		return 65 # EX_DATAERR
 	if replacement_file_name != None:
+		logger.info("Using Replacements file: %s", replacement_file_name)
 		with open(replacement_file_name, 'r') as replacement_file:
 			replacements = json.load(replacement_file)
 	# get list of region files, going to pass this into function to process region
 	region_files = world.get_regionfiles();
 	
+	
 	# Parallel
-	#p = Pool(processes=8)
-	#region_data = p.map(process_region, region_files)
+	q = Queue()
+	lp = threading.Thread(target=logger_thread, args=[q])
+	lp.start()
+	p = Pool(processes=1, initializer=process_init, initargs=[q,replacements])
+	region_data = p.map(process_region, region_files)
+	
 	# Not Parallel
-	region_data = map(process_region, region_files)
+# 	region_data = map(process_region, region_files)
 	
 	# initialize with data from first region
 	world_data = region_data[0]
@@ -247,6 +294,8 @@ def main(world_folder, replacement_file_name):
 		#print("Block: {0}:{1} ID: {2} Data: {3}".format(block[0],block[1], block[2], json.dumps(block[3], default=to_json)))
 		out_file.write("{0};{1};{2};{3}\n".format(block[0],block[1], block[2], block[3]))
 	out_file.close()
+	q.put(None)
+	lp.join()
 	return 0
 
 def usage(message=None, appname=None):
