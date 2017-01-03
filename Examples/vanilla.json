@@ -348,6 +348,7 @@
         "1": {
             "title": "Block of Concrete",
             "toID": 1,
+            "toData": 6,
             "delete": true
         },
         "0": {

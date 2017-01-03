@@ -11,16 +11,7 @@ import os, sys
 import itertools
 import logging
 from nbt.nbt import TAG_List, TAG_Long, TAG_Byte, TAG_Byte_Array, TAG_Int,TAG_Compound
-
-# local module
-try:
-	import nbt
-except ImportError:
-# nbt not in search path. Let's see if it can be found in the parent folder
-	extrasearchpath = os.path.realpath(os.path.join(__file__,os.pardir,os.pardir))
-	if not os.path.exists(os.path.join(extrasearchpath,'nbt')):
-		raise
-	sys.path.append(extrasearchpath)
+import nbt
 from multiprocessing import Pool,Queue
 import threading
 from collections import defaultdict
@@ -32,17 +23,79 @@ from QueueHandler import QueueHandler
 tags_to_strip = ["id", "x", "y", "z", "Items", "facing"]
 replacements={}
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-fh = logging.FileHandler(os.path.join(os.getcwd(), "replacements.log"))
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-fh.setFormatter(formatter)
-fh.setLevel(logging.DEBUG)
-ch = logging.StreamHandler()
-ch.setFormatter(formatter)
-ch.setLevel(logging.INFO)
-logger.addHandler(fh)
-logger.addHandler(ch)
+# This function takes a flag, and tile_data dict(dict(dict))
+# and flattens it back into a TAG_List
+def flatten_tile_entity(tile_data):
+	tile_entities = TAG_List(type=TAG_Compound)
+	for x,value_x in tile_data.viewitems():
+		for y,value_y in value_x.viewitems():
+			while True:
+				try:
+					(z,tile) = value_y.popitem()
+					tile_entities.append(tile)
+				except:
+					break
+	return tile_entities
+
+# This function takes an array of block IDs and data, and creates the Add 
+# bytearray if necessary, as well as converts all data to TAG_Byte_Array
+def parse_block_info(blocks,data):
+	add = [0] * 4096
+	for i,v in enumerate(blocks):
+		if blocks[i] > 255:
+			add[i] = blocks[i]//256
+			blocks[i] -= add[i] * 256
+	add_list = TAG_Byte_Array(name=unicode("Add"))
+	add_list.value = array_byte_to_4bit(bytearray(add))
+	block_list =TAG_Byte_Array(name=unicode("Blocks"))
+	block_list.value = bytearray(blocks)
+	data_list =TAG_Byte_Array(name=unicode("Data"))
+	data_list.value = array_byte_to_4bit(bytearray(data))
+	return (block_list,data_list,add_list)
+
+def write_block_data(region_data,output_file):
+	# initialize with data from first region
+	world_data = region_data[0]
+	for region in region_data[1:]:
+		for block in region:
+			try:
+				world_data.index(block)
+				# We've already seen this exact block
+			except ValueError:
+				world_data.append(block)
+	out_file = open(output_file, "w+")
+	out_file.write("Block ID,Data,NBT ID,NBT\n")
+	for block in world_data:
+		#print("Block: {0}:{1} ID: {2} Data: {3}".format(block[0],block[1], block[2], json.dumps(block[3], default=to_json)))
+		out_file.write("{0};{1};{2};{3}\n".format(block[0],block[1], block[2], block[3]))
+	out_file.close()
+
+def process_block_change(title,block,data,tile,z,replace_info,chunk_modified, tile_entity_modified):
+	try:
+		# If toID is omitted then no change is made
+		block = replace_info["toID"]
+		process_region.logger.debug("Changing ID: %s to %s", title, replace_info["toID"])
+		chunk_modified = True
+	except:
+		pass
+	try:
+		# If toData is omitted then no change is made  
+		data = replace_info["toData"]
+		process_region.logger.debug("Changing Data: %s to %s",title, replace_info["toData"])
+		chunk_modified = True
+	except:
+		pass
+	try:
+		# If delete property specified, try to remove the tile entity
+		replace_info["delete"]
+		if (tile.pop(z,None) != None):
+			process_region.logger.debug("Deleted Tile Data: %s",title)
+			chunk_modified = True
+			tile_entity_modified = True
+	except:
+		# Block didn't have a tile entity attached
+		pass
+	return (block,data,tile,chunk_modified,tile_entity_modified)
 
 def process_region(region_file):
 	replacements = process_region.replacements
@@ -55,8 +108,6 @@ def process_region(region_file):
 		chunk_modified = False
 		tile_entity_modified = False
 		for tile_entity in level["TileEntities"]:
-			# defaultdict(lambda: defaultdict(dict)) was supposed to handle 
-			# this, but it causes some major weirdness, so doing it by hand
 			x = tile_entity["x"].value
 			y = tile_entity["y"].value
 			z = tile_entity["z"].value
@@ -92,8 +143,8 @@ def process_region(region_file):
 					# We've already seen this exact block
 				except ValueError:
 					region_data.append(block)
-				
 				try:
+					# If no replacements file was passed in, don't try replacing blocks
 					replacements
 					if str(blocks[i]) in replacements:
 						# Block ID matched, lets check data
@@ -130,20 +181,11 @@ def process_region(region_file):
 										title = replacements[block_id][block_data][key]["title"]
 									except:
 										title = key
-									try:
-										# If toID is omitted then no change is made
-										blocks[i] = value["toID"]
-										process_region.logger.debug("Changing NBT-ID: %s", title)
-										chunk_modified = True
-									except:
-										pass
-									try:
-										# If toData is omitted then no change is made  
-										data[i] = value["toData"]
-										process_region.logger.debug("Changing NBT-Data: %s", title)
-										chunk_modified = True
-									except:
-										pass
+									(blocks[i],data[i],tile_data[x][y],
+									chunk_modified,tile_entity_modified) = process_block_change(
+										title,blocks[i],data[i],tile_data[x][y],z,
+										value,
+										chunk_modified,tile_entity_modified)
 									if "toNBT" in value:
 										chunk_modified = True
 										tile_entity_modified = True
@@ -160,72 +202,27 @@ def process_region(region_file):
 													tile_entity_modified = True
 											except:
 												pass
-									elif "delete" in value:
-										try:
-											# If delete property specified, try to remove the tile entity
-											if (tile_data[x][y].pop(z,None) != None):
-												process_region.logger.debug("Deleted Tile Data: %s",title)
-												chunk_modified = True
-												tile_entity_modified = True
-										except:
-											# Block didn't have a tile entity attached
-											pass
 							if not title:
 								try:
 									title = replacements[block_id][block_data]["title"]
 								except:
 									title = "{}:{}".format(block_id, block_data)
 							# As long as block ID and Data have matched try this, WILL override NBT matches
-							try:
-								# If toID is omitted then no change is made
-								blocks[i] = replacements[block_id][block_data]["toID"]
-								process_region.logger.debug("Changing ID: %s", title)
-								chunk_modified = True
-							except:
-								pass
-							try:
-								# If toData is omitted then no change is made  
-								data[i] = replacements[block_id][block_data]["toData"]
-								process_region.logger.debug("Changing Data: %s",title)
-								chunk_modified = True
-							except:
-								pass
-							try:
-								# If delete property specified, try to remove the tile entity
-								replacements[block_id][block_data]["delete"]
-								tile_data[x][y].pop(z,None)
-								process_region.logger.debug("Deleted Tile Data: %s",title)
-								tile_entity_modified = True
-								chunk_modified = True
-							except:
-								# Block didn't have a tile entity attached
-								pass
+							(blocks[i],data[i],tile_data[x][y],
+							chunk_modified,tile_entity_modified) = process_block_change(
+								title,blocks[i],data[i],tile_data[x][y],z,
+								replacements[block_id][block_data],
+								chunk_modified,tile_entity_modified)
 				except NameError:
 					pass
 				# If changes were made, update level variable for writing back to file
 			if chunk_modified:
-				add = [0] * 4096
-				for i,v in enumerate(blocks):
-					if blocks[i] > 255:
-						add[i] = blocks[i]//256
-						blocks[i] -= add[i] * 256
-				add_list = TAG_Byte_Array(name=unicode("Add"))
-				add_list.value = array_byte_to_4bit(bytearray(add))
-				level["Sections"][ySec]["Add"] = add_list
-				block_list =TAG_Byte_Array(name=unicode("Blocks"))
-				block_list.value = bytearray(blocks)
-				level["Sections"][ySec]["Blocks"] = block_list
-				data_list =TAG_Byte_Array(name=unicode("Data"))
-				data_list.value = array_byte_to_4bit(bytearray(data))
-				level["Sections"][ySec]["Data"] = data_list
-		if tile_entity_modified:
-			#flatten tile_data back into a TAG_List
-			tile_entities = TAG_List(type=TAG_Compound)
-			for x,value_x in tile_data.viewitems():
-				for y,value_y in value_x.viewitems():
-					for z,tile in value_y.viewitems():
-						tile_entities.append(tile)
-			level["TileEntities"] = tile_entities
+				(level["Sections"][ySec]["Blocks"],
+				 level["Sections"][ySec]["Data"],
+				 level["Sections"][ySec]["Add"]) = parse_block_info(blocks, data)
+			# Flatten tile_data into tile_entities compound tag
+			if tile_entity_modified:
+				level["TileEntities"] = flatten_tile_entity(tile_data)
 		try:
 			replacements
 			if chunk_modified:
@@ -233,9 +230,13 @@ def process_region(region_file):
 				process_region.logger.info("Writing chunk data %d,%d to %s",level["xPos"].value%32, level["zPos"].value%32, region_file)
 				# Ensure that we don't interrupt a chunk write with SigInt.
 				with DelayedKeyboardInterrupt():
-					region.write_chunk(level["xPos"].value%32, level["zPos"].value%32, chunk)
+					region.write_chunk(level["xPos"].value%32, level["zPos"].value%32, chunk)				
 		except NameError as e:
 			print("Error finding: {0}".format(e))
+			pass
+		try:
+			del tile_entities
+		except:
 			pass
 	return region_data
 
@@ -254,9 +255,24 @@ def logger_thread(q):
 			break
 		logger.handle(record)
 
+def configure_logging():
+	logger = logging.getLogger(__name__)
+	logger.setLevel(logging.DEBUG)
+	fh = logging.FileHandler(os.path.join(os.getcwd(), "replacements.log"))
+	formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+	fh.setFormatter(formatter)
+	fh.setLevel(logging.DEBUG)
+	ch = logging.StreamHandler()
+	ch.setFormatter(formatter)
+	ch.setLevel(logging.INFO)
+	logger.addHandler(fh)
+	logger.addHandler(ch)
+	return logger
+	
 def main(world_folder, replacement_file_name):
 	global replacements
 	world = nbt.world.WorldFolder(world_folder)
+	logger = configure_logging()
 	logger.info("Starting processing of %s", world_folder)
 	if not isinstance(world, nbt.world.AnvilWorldFolder):
 		logger.error("%s is not an Anvil world" % (world_folder))
@@ -268,34 +284,21 @@ def main(world_folder, replacement_file_name):
 	# get list of region files, going to pass this into function to process region
 	region_files = world.get_regionfiles();
 	
-	
 	# Parallel
 	q = Queue()
 	lp = threading.Thread(target=logger_thread, args=[q])
 	lp.start()
-	p = Pool(processes=1, initializer=process_init, initargs=[q,replacements])
+	p = Pool(initializer=process_init, initargs=[q,replacements], maxtasksperchild=1)
 	region_data = p.map(process_region, region_files)
+	# Map has finished up, lets close the logging QUEUE
+	q.put(None)
+	lp.join()
 	
 	# Not Parallel
 # 	region_data = map(process_region, region_files)
 	
-	# initialize with data from first region
-	world_data = region_data[0]
-	for region in region_data[1:]:
-		for block in region:
-			try:
-				world_data.index(block)
-				# We've already seen this exact block
-			except ValueError:
-				world_data.append(block)
-	out_file = open("output.txt", "w+")
-	out_file.write("Block ID,Data,NBT ID,NBT\n")
-	for block in world_data:
-		#print("Block: {0}:{1} ID: {2} Data: {3}".format(block[0],block[1], block[2], json.dumps(block[3], default=to_json)))
-		out_file.write("{0};{1};{2};{3}\n".format(block[0],block[1], block[2], block[3]))
-	out_file.close()
-	q.put(None)
-	lp.join()
+	# Write output data
+	write_block_data(region_data,"output.txt")
 	return 0
 
 def usage(message=None, appname=None):
