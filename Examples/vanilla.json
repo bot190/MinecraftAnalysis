@@ -414,7 +414,8 @@
                 "fromNBT": {
                     "id": "RCSpeedBoostRailTile"
                 },
-                "toID": 27
+                "toID": 27,
+                "adjustData": 8
             },
             "RCSpeedRailTile": {
                 "fromNBT": {
