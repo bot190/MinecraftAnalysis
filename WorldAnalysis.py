@@ -27,11 +27,11 @@ replacements={}
 # and flattens it back into a TAG_List
 def flatten_tile_entity(tile_data):
     tile_entities = TAG_List(type=TAG_Compound)
-    for x,value_x in tile_data.viewitems():
-        for y,value_y in value_x.viewitems():
+    for _,value_x in tile_data.viewitems():
+        for _,value_y in value_x.viewitems():
             while True:
                 try:
-                    (z,tile) = value_y.popitem()
+                    (_,tile) = value_y.popitem()
                     tile_entities.append(tile)
                 except:
                     break
@@ -41,7 +41,7 @@ def flatten_tile_entity(tile_data):
 # bytearray if necessary, as well as converts all data to TAG_Byte_Array
 def parse_block_info(blocks,data):
     add = [0] * 4096
-    for i,v in enumerate(blocks):
+    for i,_ in enumerate(blocks):
         if blocks[i] > 255:
             add[i] = blocks[i]//256
             blocks[i] -= add[i] * 256
@@ -243,6 +243,7 @@ def process_region(region_file):
             pass
         try:
             del tile_entities
+            del level
         except:
             pass
     return region_data
@@ -289,13 +290,13 @@ def main(world_folder, replacement_file_name):
         with open(replacement_file_name, 'r') as replacement_file:
             replacements = json.load(replacement_file)
     # get list of region files, going to pass this into function to process region
-    region_files = world.get_regionfiles();
+    region_files = world.get_regionfiles()
     
     # Parallel
     q = Queue()
     lp = threading.Thread(target=logger_thread, args=[q])
     lp.start()
-    p = Pool(initializer=process_init, initargs=[q,replacements], maxtasksperchild=1)
+    p = Pool(processes=4,initializer=process_init, initargs=[q,replacements], maxtasksperchild=1)
     region_data = p.map(process_region, region_files)
     # Map has finished up, lets close the logging QUEUE
     q.put(None)
