@@ -1,0 +1,23 @@
+[package]
+name = "minecraft-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+indicatif.workspace = true
+crossterm.workspace = true
+miette.workspace = true
+minecraft-analysis-core = { path = "../minecraft-analysis-core" }
+ratatui.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
