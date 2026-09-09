@@ -80,11 +80,33 @@ The supported development environment is the locked Nix flake:
 
 ```sh
 nix develop
-cargo test --workspace --locked
 ```
 
-`nix flake check path:.` runs formatting, lint, build, and test checks with the
-pinned toolchain. Cargo continues to own Rust dependency resolution.
+Run the same Rust checks as the independent GitHub Actions workflows from that
+shell:
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+The CI workflows install stable Rust directly rather than using Nix. Cargo
+continues to own Rust dependency resolution through the checked-in lockfile.
+`nix flake check path:.` remains available as an aggregate check of the locked
+development environment.
+
+Install [zizmor](https://docs.zizmor.sh/installation/) and audit the GitHub
+Actions workflows with the same enforced thresholds as CI:
+
+```sh
+zizmor --min-severity=medium --min-confidence=medium .github/workflows/
+```
+
+After the workflows have completed successfully on `master`, configure branch
+protection to require the `Format`, `Check`, `Clippy`, `Test`, and `Zizmor`
+status checks.
 
 ## Inputs and template creation
 

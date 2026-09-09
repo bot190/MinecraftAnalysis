@@ -767,7 +767,7 @@ fn nbt_view_validates_region_chunks_before_terminal_initialization() {
     assert!(absent.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&absent.stderr);
     assert!(stderr.contains("global (0,0)"), "{stderr}");
-    assert!(stderr.contains("local (0,0)"), "{stderr}");
+    assert_diagnostic_words(&stderr, "local (0,0)");
     assert!(!stderr.contains("terminal"), "{stderr}");
 
     let malformed = nbt_view_with(&path, &["--local-chunk", "-1,0"]);
