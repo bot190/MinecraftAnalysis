@@ -434,8 +434,7 @@ fn convert_item(
         &loaded.value_maps,
         |name| {
             RegistryName::parse(name)
-                .ok()
-                .is_some_and(|name| target.by_name(&RegistryKind::Item, &name).is_some())
+                .is_ok_and(|name| target.by_name(&RegistryKind::Item, &name).is_some())
         },
     )
     .map_err(|source| Error::Item {

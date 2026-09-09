@@ -469,8 +469,7 @@ fn apply_block_entity_decisions(
 
 fn target_name_exists(catalog: &RegistryCatalog, name: &str) -> bool {
     crate::registry::RegistryName::parse(name)
-        .ok()
-        .is_some_and(|name| catalog.by_name(&RegistryKind::Block, &name).is_some())
+        .is_ok_and(|name| catalog.by_name(&RegistryKind::Block, &name).is_some())
 }
 
 fn selected_rules(decision: &Decision) -> Vec<String> {

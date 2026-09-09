@@ -1023,8 +1023,7 @@ fn assess(
             &loaded.value_maps,
             |name| {
                 RegistryName::parse(name)
-                    .ok()
-                    .is_some_and(|name| target.by_name(kind.as_ref().unwrap(), &name).is_some())
+                    .is_ok_and(|name| target.by_name(kind.as_ref().unwrap(), &name).is_some())
             },
         ) {
             Ok(applied) => (applied.disposition, None, applied.map_outcomes),
