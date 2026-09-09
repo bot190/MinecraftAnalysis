@@ -215,3 +215,17 @@ pip-log.txt
 .mr.developer.cfg
 /OldServer/
 /Testing/
+
+#############
+## Rust
+#############
+
+/target/
+
+#############
+## Nix
+#############
+
+/.direnv/
+/result
+/result-*
