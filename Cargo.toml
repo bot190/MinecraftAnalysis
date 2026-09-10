@@ -11,7 +11,7 @@ license = "MIT"
 [workspace.dependencies]
 cesu8 = "1.1"
 clap = { version = "4.5", features = ["derive"] }
-crossterm = "0.28"
+crossterm = "0.29"
 fastanvil = { version = "0.32", default-features = false }
 fastnbt = "2.6"
 flate2 = "1.1"
