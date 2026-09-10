@@ -148,25 +148,20 @@ fn nbt_dump(file: &std::path::Path) -> Output {
         .unwrap()
 }
 
-fn nbt_dump_with(file: &std::path::Path, selector: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"));
-    command.args(["nbt", "dump"]).arg(file).args(selector);
-    command.output().unwrap()
-}
-
 fn nbt_dump_world(
     world: &std::path::Path,
     location: &str,
-    side: &str,
-    rule: &std::path::Path,
+    rule: Option<&std::path::Path>,
 ) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"));
+    command
         .args(["nbt", "dump", "--world"])
         .arg(world)
-        .args(["--location", location, side])
-        .arg(rule)
-        .output()
-        .unwrap()
+        .args(["--location", location]);
+    if let Some(rule) = rule {
+        command.arg("--rules").arg(rule);
+    }
+    command.output().unwrap()
 }
 
 fn write_block_world(root: &std::path::Path) {
@@ -386,7 +381,7 @@ fn rules_infer_profile_and_identity_failures_leave_stdout_empty() {
 }
 
 #[test]
-fn nbt_dump_world_coordinate_resolves_each_rule_side_and_is_atomic() {
+fn nbt_dump_world_coordinate_uses_shared_context_and_is_atomic() {
     let root = tempfile::tempdir().unwrap();
     let world = root.path().join("world");
     write_block_world(&world);
@@ -399,17 +394,7 @@ fn nbt_dump_world_coordinate_resolves_each_rule_side_and_is_atomic() {
     }"#,
     )
     .unwrap();
-    let target_rule = root.path().join("target.json");
-    fs::write(
-        &target_rule,
-        r#"{
-      "schema_version":2,"rule_set":"target","source_profile":"forge-1.7.10",
-      "target_manifest":[{"kind":"block","name":"target:machine","numeric_id":300}]
-    }"#,
-    )
-    .unwrap();
-
-    let source = nbt_dump_world(&world, "-1,15,-1", "--source-rule", &source_rule);
+    let source = nbt_dump_world(&world, "-1,15,-1", Some(&source_rule));
     assert!(
         source.status.success(),
         "{}",
@@ -417,10 +402,10 @@ fn nbt_dump_world_coordinate_resolves_each_rule_side_and_is_atomic() {
     );
     let text = String::from_utf8(source.stdout).unwrap();
     assert_eq!(text, "coordinate: -1,15,-1\ndimension: overworld\nglobal chunk: -1,-1\nregion: -1,-1\nlocal chunk: 31,31\nnumeric ID: 300\nregistry name: source:machine\nmetadata: 2\nblock light: unavailable\nsky light: 15\nsection Y: 0\nsection index: 4095\nblock entity:\n{\n  Energy: 42L,\n  id: \"mod:tile\",\n  nested: {\n    value: 7\n  },\n  x: -1,\n  y: 15,\n  z: -1\n}\n");
-    let repeated = nbt_dump_world(&world, "-1,15,-1", "--source-rule", &source_rule);
+    let repeated = nbt_dump_world(&world, "-1,15,-1", Some(&source_rule));
     assert_eq!(repeated.stdout, text.as_bytes());
 
-    let without_entity = nbt_dump_world(&world, "-16,0,-16", "--source-rule", &source_rule);
+    let without_entity = nbt_dump_world(&world, "-16,0,-16", Some(&source_rule));
     assert!(without_entity.status.success());
     assert!(String::from_utf8_lossy(&without_entity.stdout).ends_with("block entity:\nnone\n"));
 
@@ -433,74 +418,32 @@ fn nbt_dump_world_coordinate_resolves_each_rule_side_and_is_atomic() {
     let nether = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
         .args(["nbt", "dump", "--world"])
         .arg(&world)
-        .args([
-            "--location",
-            "-1,15,-1",
-            "--dimension",
-            "nether",
-            "--source-rule",
-        ])
+        .args(["--location", "-1,15,-1", "--dimension", "nether", "--rules"])
         .arg(&source_rule)
         .output()
         .unwrap();
     assert!(nether.status.success());
     assert!(String::from_utf8_lossy(&nether.stdout).contains("dimension: nether\n"));
 
-    let target = nbt_dump_world(&world, "-1,15,-1", "--target-rule", &target_rule);
-    assert!(
-        target.status.success(),
-        "{}",
-        String::from_utf8_lossy(&target.stderr)
-    );
-    assert!(String::from_utf8_lossy(&target.stdout).contains("registry name: target:machine\n"));
-
-    let unresolved_rule = root.path().join("unresolved.json");
-    fs::write(
-        &unresolved_rule,
-        r#"{"schema_version":2,"rule_set":"none","source_profile":"forge-1.7.10"}"#,
-    )
-    .unwrap();
-    let unresolved = nbt_dump_world(&world, "-1,15,-1", "--target-rule", &unresolved_rule);
-    assert!(!unresolved.status.success());
-    assert!(unresolved.stdout.is_empty());
-    let diagnostic = String::from_utf8_lossy(&unresolved.stderr);
-    assert!(diagnostic.contains("target registry"), "{diagnostic}");
-    assert!(diagnostic.contains("numeric block ID 300"), "{diagnostic}");
-    assert!(diagnostic.contains("-1,15,-1"), "{diagnostic}");
-}
-
-fn nbt_view_with(file: &std::path::Path, selector: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"));
-    command.args(["nbt", "view"]).arg(file).args(selector);
-    command.output().unwrap()
-}
-
-fn chunk_document(value: i32) -> Document {
-    Document {
-        root_name: "chunk-root".into(),
-        root: BTreeMap::from([("value".into(), Value::Int(value))]),
-    }
-}
-
-fn write_region(path: &std::path::Path, chunks: &[(usize, usize, i32)]) {
-    let mut writer = RegionWriter::new().unwrap();
-    for &(x, z, value) in chunks {
-        writer
-            .write_chunk(
-                x,
-                z,
-                &nbt::encode_uncompressed(&chunk_document(value)).unwrap(),
-                1,
-            )
-            .unwrap();
-    }
-    fs::write(path, writer.finish().unwrap()).unwrap();
+    let unresolved = nbt_dump_world(&world, "-1,15,-1", None);
+    assert!(unresolved.status.success());
+    assert!(String::from_utf8_lossy(&unresolved.stdout)
+        .contains("numeric ID: 300\nregistry name: unresolved\n"));
 }
 
 fn nbt_view(file: &std::path::Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
         .args(["nbt", "view"])
         .arg(file)
+        .output()
+        .unwrap()
+}
+
+fn nbt_view_world(world: &std::path::Path, location: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
+        .args(["nbt", "view", "--world"])
+        .arg(world)
+        .args(["--location", location])
         .output()
         .unwrap()
 }
@@ -571,6 +514,36 @@ fn nbt_view_rejects_invalid_inputs_before_terminal_initialization() {
             "viewer initialized for {name}"
         );
     }
+}
+
+#[test]
+fn nbt_view_resolves_requested_world_block_before_terminal_initialization() {
+    let root = tempfile::tempdir().unwrap();
+    let world = root.path().join("world");
+    write_block_world(&world);
+
+    let valid = nbt_view_world(&world, "-1,15,-1");
+    let valid_stderr = String::from_utf8_lossy(&valid.stderr);
+    assert!(!valid.status.success());
+    assert!(valid_stderr.contains("terminal"), "{valid_stderr}");
+
+    let absent = nbt_view_world(&world, "-1,32,-1");
+    let absent_stderr = String::from_utf8_lossy(&absent.stderr);
+    assert!(!absent.status.success());
+    assert!(
+        absent_stderr.contains("no stored block is indexed"),
+        "{absent_stderr}"
+    );
+    assert!(!absent_stderr.contains("initialize NBT viewer terminal"));
+
+    let missing = nbt_view_world(&root.path().join("missing"), "0,0,0");
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(!missing.status.success());
+    assert!(
+        missing_stderr.contains("cannot resolve NBT world"),
+        "{missing_stderr}"
+    );
+    assert!(!missing_stderr.contains("initialize NBT viewer terminal"));
 }
 
 #[test]
@@ -670,112 +643,6 @@ fn nbt_dump_preserves_typed_data_and_escaping() {
 }
 
 #[test]
-fn nbt_dump_selects_region_chunks_by_global_and_local_coordinates() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("r.-2.-1.mca");
-    write_region(&path, &[(31, 31, 17), (0, 0, 23)]);
-
-    let global = nbt_dump_with(&path, &["--chunk", "-33,-1"]);
-    assert!(
-        global.status.success(),
-        "{}",
-        String::from_utf8_lossy(&global.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(global.stdout).unwrap(),
-        "{\n  value: 17\n}\n"
-    );
-
-    let local = nbt_dump_with(&path, &["--local-chunk", "0,0"]);
-    assert!(
-        local.status.success(),
-        "{}",
-        String::from_utf8_lossy(&local.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(local.stdout).unwrap(),
-        "{\n  value: 23\n}\n"
-    );
-}
-
-#[test]
-fn region_chunk_failures_are_contextual_and_emit_no_stdout() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("r.0.0.mca");
-    write_region(&path, &[(0, 0, 1)]);
-
-    for (selector, expected) in [
-        (&["--chunk", "32,0"][..], "belongs to region"),
-        (&["--local-chunk", "32,0"][..], "range 0 through 31"),
-        (&["--local-chunk", "1,1"][..], "absent"),
-    ] {
-        let output = nbt_dump_with(&path, selector);
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_diagnostic_words(&stderr, expected);
-    }
-
-    for selector in [
-        &["--chunk", "1"][..],
-        &["--chunk", "1,2,3"][..],
-        &["--chunk", "0,0", "--local-chunk", "0,0"][..],
-    ] {
-        let output = nbt_dump_with(&path, selector);
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-    }
-
-    let malformed_name = root.path().join("region.mca");
-    fs::copy(&path, &malformed_name).unwrap();
-    let output = nbt_dump_with(&malformed_name, &["--chunk", "0,0"]);
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert_diagnostic_words(
-        &String::from_utf8_lossy(&output.stderr),
-        "expected region filename",
-    );
-
-    let truncated = root.path().join("r.1.1.mca");
-    fs::write(&truncated, [0; 32]).unwrap();
-    let output = nbt_dump_with(&truncated, &["--local-chunk", "0,0"]);
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("header is truncated"));
-
-    let malformed_chunk = root.path().join("r.2.2.mca");
-    let mut writer = RegionWriter::new().unwrap();
-    writer.write_chunk(0, 0, b"not nbt", 1).unwrap();
-    fs::write(&malformed_chunk, writer.finish().unwrap()).unwrap();
-    let output = nbt_dump_with(&malformed_chunk, &["--local-chunk", "0,0"]);
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cannot decode region chunk"), "{stderr}");
-    assert!(stderr.contains("global"), "{stderr}");
-    assert!(stderr.contains("(64,64)"), "{stderr}");
-    assert!(stderr.contains("local (0,0)"), "{stderr}");
-}
-
-#[test]
-fn nbt_view_validates_region_chunks_before_terminal_initialization() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("r.0.0.mca");
-    write_region(&path, &[]);
-    let absent = nbt_view_with(&path, &["--chunk", "0,0"]);
-    assert!(!absent.status.success());
-    assert!(absent.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&absent.stderr);
-    assert!(stderr.contains("global (0,0)"), "{stderr}");
-    assert_diagnostic_words(&stderr, "local (0,0)");
-    assert!(!stderr.contains("terminal"), "{stderr}");
-
-    let malformed = nbt_view_with(&path, &["--local-chunk", "-1,0"]);
-    assert!(!malformed.status.success());
-    assert!(!String::from_utf8_lossy(&malformed.stderr).contains("terminal"));
-}
-
-#[test]
 fn nbt_dump_failures_have_context_and_no_partial_stdout() {
     let root = tempfile::tempdir().unwrap();
     let missing_path = root.path().join("missing.nbt");
@@ -867,16 +734,25 @@ fn nbt_help_exposes_dump_and_rejects_level() {
     assert!(dump_help.status.success());
     assert!(String::from_utf8_lossy(&dump_help.stdout).contains("<FILE>"));
     let dump_help = String::from_utf8_lossy(&dump_help.stdout);
-    assert!(dump_help.contains("--chunk <X,Z>"));
-    assert!(dump_help.contains("--local-chunk <X,Z>"));
+    assert!(dump_help.contains("--world <WORLD>"));
+    assert!(dump_help.contains("--location <X,Y,Z>"));
+    assert!(dump_help.contains("--dimension <DIMENSION>"));
+    assert!(dump_help.contains("--rules <FILE>"));
+    assert!(!dump_help.contains("--chunk"));
+    assert!(!dump_help.contains("--local-chunk"));
+    assert!(!dump_help.contains("--source-rule"));
+    assert!(!dump_help.contains("--target-rule"));
 
     let view_help = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
         .args(["nbt", "view", "--help"])
         .output()
         .unwrap();
     let view_help = String::from_utf8_lossy(&view_help.stdout);
-    assert!(view_help.contains("--chunk <X,Z>"));
-    assert!(view_help.contains("--local-chunk <X,Z>"));
+    assert!(view_help.contains("--world <WORLD>"));
+    assert!(view_help.contains("--location <X,Y,Z>"));
+    assert!(view_help.contains("--rules <FILE>"));
+    assert!(!view_help.contains("--chunk"));
+    assert!(!view_help.contains("--local-chunk"));
 
     let level = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
         .args(["nbt", "level", "--world", "."])

@@ -177,35 +177,20 @@ impl From<ManifestSelection> for ManifestSide {
 
 #[derive(Debug, Subcommand)]
 enum NbtCommand {
-    /// Print one standalone NBT document's root compound as SNBT.
-    Dump(DumpInputs),
-    /// Inspect one standalone NBT document interactively.
-    View {
-        /// Standalone NBT file, or region file when a selector is supplied.
-        file: PathBuf,
-        #[command(flatten)]
-        selector: nbt_input::ChunkSelectorArgs,
-        /// Transformation rule document used to enrich source block identities.
-        #[arg(long)]
-        rules: Vec<PathBuf>,
-    },
+    /// Print a standalone NBT document or one world block.
+    Dump(NbtInputs),
+    /// Inspect a standalone NBT document or one world block interactively.
+    View(NbtInputs),
 }
 
 #[derive(Clone, Debug, Args)]
-#[command(group(ArgGroup::new("dump_input").required(true).multiple(false).args(["file", "world"])))]
-#[command(group(ArgGroup::new("rule_side").multiple(false).args(["source_rule", "target_rule"])))]
-struct DumpInputs {
-    /// Standalone NBT file, or region file when a selector is supplied.
-    #[arg(conflicts_with_all = ["location", "source_rule", "target_rule"])]
+#[command(group(ArgGroup::new("nbt_input").required(true).multiple(false).args(["file", "world"])))]
+struct NbtInputs {
+    /// Standalone NBT file.
+    #[arg(conflicts_with = "location")]
     file: Option<PathBuf>,
-    /// Global chunk coordinates in x,z form for positional region-file mode.
-    #[arg(long, value_name = "X,Z", conflicts_with_all = ["local_chunk", "world"], requires = "file", allow_hyphen_values = true)]
-    chunk: Option<nbt_input::Coordinates>,
-    /// Region-local chunk coordinates in x,z form for positional region-file mode.
-    #[arg(long, value_name = "X,Z", conflicts_with_all = ["chunk", "world"], requires = "file", allow_hyphen_values = true)]
-    local_chunk: Option<nbt_input::Coordinates>,
     /// Java Edition world root containing the selected dimension.
-    #[arg(long, requires_all = ["location", "rule_side"])]
+    #[arg(long, requires = "location")]
     world: Option<PathBuf>,
     /// World-global block coordinate formatted as `x,y,z`.
     #[arg(
@@ -216,14 +201,16 @@ struct DumpInputs {
     )]
     location: Option<BlockCoordinate>,
     /// World dimension: overworld, nether, end, or an existing DIM... directory.
-    #[arg(long, default_value = "overworld", requires = "world")]
+    #[arg(
+        long,
+        default_value = "overworld",
+        requires = "world",
+        conflicts_with = "file"
+    )]
     dimension: world::DimensionId,
-    /// Rule document whose source registry interprets the stored numeric ID.
-    #[arg(long, value_name = "FILE", requires = "world")]
-    source_rule: Option<PathBuf>,
-    /// Rule document whose target registry interprets the stored numeric ID.
-    #[arg(long, value_name = "FILE", requires = "world")]
-    target_rule: Option<PathBuf>,
+    /// Transformation rule document used to enrich source block identities.
+    #[arg(long, value_name = "FILE", requires = "world", conflicts_with = "file")]
+    rules: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -351,24 +338,14 @@ fn run() -> miette::Result<i32> {
         Command::Nbt { command } => match command {
             NbtCommand::Dump(inputs) => {
                 if let (Some(file), None) = (&inputs.file, &inputs.world) {
-                    dump_nbt(
-                        file,
-                        nbt_input::ChunkSelectorArgs {
-                            chunk: inputs.chunk,
-                            local_chunk: inputs.local_chunk,
-                        },
-                    )?;
+                    dump_nbt(file)?;
                 } else {
                     dump_world_block(&inputs)?;
                 }
                 Ok(0)
             }
-            NbtCommand::View {
-                file,
-                selector,
-                rules,
-            } => {
-                view_nbt(&file, selector, &rules)?;
+            NbtCommand::View(inputs) => {
+                view_nbt(&inputs)?;
                 Ok(0)
             }
         },
@@ -611,8 +588,8 @@ fn prepare_source(
     }
 }
 
-fn dump_nbt(path: &Path, selector: nbt_input::ChunkSelectorArgs) -> miette::Result<()> {
-    let loaded = nbt_input::load(path, selector)?;
+fn dump_nbt(path: &Path) -> miette::Result<()> {
+    let loaded = nbt_input::load(path, nbt_input::ChunkSelectorArgs::default())?;
     let snbt = nbt::to_snbt(&loaded.document).map_err(|error| match &loaded.source {
         nbt_input::Source::Standalone { path, .. } => {
             miette!("cannot render NBT file {} as SNBT: {error}", path.display())
@@ -641,38 +618,56 @@ fn dump_nbt(path: &Path, selector: nbt_input::ChunkSelectorArgs) -> miette::Resu
     Ok(())
 }
 
-fn dump_world_block(inputs: &DumpInputs) -> miette::Result<()> {
+struct PreparedNbtWorld {
+    world: PathBuf,
+    coordinate: [i32; 3],
+    loaded: nbt_input::LoadedDocument,
+    identity: nbt_context::IdentityContext,
+}
+
+fn prepare_nbt_world(inputs: &NbtInputs) -> miette::Result<PreparedNbtWorld> {
     let requested_world = inputs.world.as_deref().expect("clap requires world mode");
     let coordinate = inputs.location.expect("clap requires location").0;
     let world = fs::canonicalize(requested_world).map_err(|error| {
         miette!(
-            "cannot resolve dump world {}: {error}",
+            "cannot resolve NBT world {}: {error}",
             requested_world.display()
         )
     })?;
     if !world.is_dir() {
-        return Err(miette!("dump world {} is not a directory", world.display()));
+        return Err(miette!("NBT world {} is not a directory", world.display()));
     }
-    let (rule_path, side) = inputs
-        .source_rule
-        .as_ref()
-        .map(|path| (path, "source"))
-        .or_else(|| inputs.target_rule.as_ref().map(|path| (path, "target")))
-        .expect("clap requires one rule side");
-    let catalog = dump_catalog(&world, rule_path, side)?;
     let loaded = nbt_input::load_world_chunk(&world, &inputs.dimension, coordinate)?;
-    let nbt_input::Source::RegionChunk { selection, .. } = loaded.source else {
+    let nbt_input::Source::RegionChunk { path, .. } = &loaded.source else {
         unreachable!("world loader always returns a region chunk")
     };
+    let identity = nbt_context::load(path, &inputs.rules)?;
+    Ok(PreparedNbtWorld {
+        world,
+        coordinate,
+        loaded,
+        identity,
+    })
+}
+
+fn dump_world_block(inputs: &NbtInputs) -> miette::Result<()> {
+    let prepared = prepare_nbt_world(inputs)?;
+    let coordinate = prepared.coordinate;
+    let world = &prepared.world;
+    let loaded = &prepared.loaded;
+    let nbt_input::Source::RegionChunk { selection, .. } = &loaded.source else {
+        unreachable!("world loader always returns a region chunk")
+    };
+    let selection = *selection;
     let index = minecraft_analysis_core::chunk_blocks::BlockIndex::build(
         &loaded.document,
         [selection.global.x, selection.global.z],
-        &catalog,
+        &prepared.identity.catalog,
     )
     .map_err(|error| {
         coordinate_error(
             inputs,
-            &world,
+            world,
             selection,
             coordinate,
             format!("block storage is unavailable: {error}"),
@@ -681,31 +676,23 @@ fn dump_world_block(inputs: &DumpInputs) -> miette::Result<()> {
     let record = index.get(coordinate).ok_or_else(|| {
         coordinate_error(
             inputs,
-            &world,
+            world,
             selection,
             coordinate,
             "no stored block is indexed at the coordinate",
         )
     })?;
-    let identity = record.identity.as_ref().ok_or_else(|| {
-        coordinate_error(
-            inputs,
-            &world,
-            selection,
-            coordinate,
-            format!(
-                "{side} registry does not resolve numeric block ID {}",
-                record.id
-            ),
-        )
-    })?;
+    let identity = record
+        .identity
+        .as_ref()
+        .map_or("unresolved", |identity| identity.name.as_str());
     let entity = record.block_entity.map_or_else(
         || Ok("none".to_owned()),
         |value| {
             nbt::value_to_snbt(value).map_err(|error| {
                 coordinate_error(
                     inputs,
-                    &world,
+                    world,
                     selection,
                     coordinate,
                     format!("cannot render associated block entity as SNBT: {error}"),
@@ -719,7 +706,7 @@ fn dump_world_block(inputs: &DumpInputs) -> miette::Result<()> {
         "coordinate: {},{},{}\ndimension: {}\nglobal chunk: {},{}\nregion: {},{}\nlocal chunk: {},{}\nnumeric ID: {}\nregistry name: {}\nmetadata: {}\nblock light: {}\nsky light: {}\nsection Y: {}\nsection index: {}\nblock entity:\n{}\n",
         coordinate[0], coordinate[1], coordinate[2], nbt_input::dimension_label(&inputs.dimension),
         selection.global.x, selection.global.z, selection.region.x, selection.region.z,
-        selection.local.x, selection.local.z, record.id, identity.name, record.metadata,
+        selection.local.x, selection.local.z, record.id, identity, record.metadata,
         light(record.block_light), light(record.sky_light), record.section_y, record.section_index, entity
     );
     let stdout = std::io::stdout();
@@ -729,46 +716,8 @@ fn dump_world_block(inputs: &DumpInputs) -> miette::Result<()> {
     Ok(())
 }
 
-fn dump_catalog(
-    world: &Path,
-    rule_path: &Path,
-    side: &str,
-) -> miette::Result<registry::RegistryCatalog> {
-    let loaded = rules::load_many(&[rule_path.to_owned()])
-        .map_err(|error| miette!("cannot load {side} rule {}: {error}", rule_path.display()))?;
-    let mut catalog = if side == "source" {
-        prepare_source(world, loaded.source_profile).map_err(|error| {
-            miette!(
-                "cannot build source catalog for world {}: {error}",
-                world.display()
-            )
-        })?
-    } else {
-        registry::RegistryCatalog::default()
-    };
-    for (path, document) in &loaded.documents {
-        let manifest = if side == "source" {
-            &document.source_manifest
-        } else {
-            &document.target_manifest
-        };
-        rules::apply_manifest(&mut catalog, manifest, &format!("{side} rules")).map_err(
-            |error| {
-                miette!(
-                    "cannot apply {side} manifest from {}: {error}",
-                    path.display()
-                )
-            },
-        )?;
-    }
-    if side == "target" {
-        catalog.add_vanilla_fallbacks(VanillaVersion::Minecraft1_12_2);
-    }
-    Ok(catalog)
-}
-
 fn coordinate_error(
-    inputs: &DumpInputs,
+    inputs: &NbtInputs,
     world: &Path,
     selection: nbt_input::ChunkSelection,
     coordinate: [i32; 3],
@@ -782,20 +731,28 @@ fn coordinate_error(
     )
 }
 
-fn view_nbt(
-    path: &Path,
-    selector: nbt_input::ChunkSelectorArgs,
-    rules: &[PathBuf],
-) -> miette::Result<()> {
-    let loaded = nbt_input::load(path, selector)?;
-    let identity = match &loaded.source {
-        nbt_input::Source::RegionChunk { path, .. } => Some(nbt_context::load(path, rules)?),
-        nbt_input::Source::Standalone { .. } if !rules.is_empty() => {
-            return Err(miette!("--rules requires a selected region chunk"));
-        }
-        nbt_input::Source::Standalone { .. } => None,
-    };
-    nbt_viewer::run(&loaded.source, &loaded.document, identity.as_ref())
+fn view_nbt(inputs: &NbtInputs) -> miette::Result<()> {
+    if let Some(path) = &inputs.file {
+        let loaded = nbt_input::load(path, nbt_input::ChunkSelectorArgs::default())?;
+        return nbt_viewer::run(&loaded.source, &loaded.document, None, None);
+    }
+    let prepared = prepare_nbt_world(inputs)?;
+    nbt_viewer::run(
+        &prepared.loaded.source,
+        &prepared.loaded.document,
+        Some(&prepared.identity),
+        Some(prepared.coordinate),
+    )
+    .map_err(|error| {
+        miette!(
+            "cannot view world {} dimension {} coordinate ({},{},{}): {error}",
+            prepared.world.display(),
+            nbt_input::dimension_label(&inputs.dimension),
+            prepared.coordinate[0],
+            prepared.coordinate[1],
+            prepared.coordinate[2]
+        )
+    })
 }
 
 struct PreparedInputs {
@@ -936,9 +893,10 @@ mod tests {
             "minecraft-analysis",
             "nbt",
             "view",
-            "r.0.0.mca",
-            "--chunk",
-            "0,0",
+            "--world",
+            "world",
+            "--location",
+            "0,0,0",
             "--rules",
             "first.json",
             "--rules",
@@ -946,7 +904,7 @@ mod tests {
         ])
         .unwrap();
         let Command::Nbt {
-            command: NbtCommand::View { rules, .. },
+            command: NbtCommand::View(NbtInputs { rules, .. }),
         } = cli.command
         else {
             panic!("expected nbt view")
@@ -958,9 +916,9 @@ mod tests {
     }
 
     #[test]
-    fn nbt_dump_world_mode_enforces_complete_exclusive_inputs() {
+    fn nbt_commands_enforce_complete_exclusive_inputs() {
         let valid = [
-            vec!["--world", "w", "--location", "1,2,3", "--source-rule", "r"],
+            vec!["--world", "w", "--location", "1,2,3"],
             vec![
                 "--world",
                 "w",
@@ -968,57 +926,37 @@ mod tests {
                 "-1,2,-3",
                 "--dimension",
                 "nether",
-                "--target-rule",
+                "--rules",
                 "r",
             ],
         ];
-        for trailing in valid {
-            let mut args = vec!["minecraft-analysis", "nbt", "dump"];
-            args.extend(trailing);
-            assert!(Cli::try_parse_from(args).is_ok());
+        for subcommand in ["dump", "view"] {
+            for trailing in &valid {
+                let mut args = vec!["minecraft-analysis", "nbt", subcommand];
+                args.extend(trailing.iter().copied());
+                assert!(Cli::try_parse_from(args).is_ok());
+            }
         }
         let invalid = [
             vec![],
-            vec!["--world", "w", "--source-rule", "r"],
-            vec!["--location", "1,2,3", "--source-rule", "r"],
-            vec!["--world", "w", "--location", "1,2,3"],
-            vec![
-                "--world",
-                "w",
-                "--location",
-                "1,2,3",
-                "--source-rule",
-                "a",
-                "--target-rule",
-                "b",
-            ],
-            vec![
-                "file.dat",
-                "--world",
-                "w",
-                "--location",
-                "1,2,3",
-                "--source-rule",
-                "r",
-            ],
-            vec![
-                "--world",
-                "w",
-                "--location",
-                "1,2,3",
-                "--source-rule",
-                "r",
-                "--chunk",
-                "0,0",
-            ],
+            vec!["--world", "w"],
+            vec!["--location", "1,2,3"],
+            vec!["file.dat", "--world", "w", "--location", "1,2,3"],
+            vec!["file.dat", "--rules", "r"],
+            vec!["file.dat", "--dimension", "nether"],
+            vec!["--world", "w", "--location", "1,2,3", "--chunk", "0,0"],
+            vec!["--world", "w", "--location", "1,2,3", "--source-rule", "r"],
+            vec!["--world", "w", "--location", "1,2,3", "--target-rule", "r"],
         ];
-        for trailing in invalid {
-            let mut args = vec!["minecraft-analysis", "nbt", "dump"];
-            args.extend(trailing);
-            assert!(
-                Cli::try_parse_from(args.clone()).is_err(),
-                "accepted {args:?}"
-            );
+        for subcommand in ["dump", "view"] {
+            for trailing in &invalid {
+                let mut args = vec!["minecraft-analysis", "nbt", subcommand];
+                args.extend(trailing.iter().copied());
+                assert!(
+                    Cli::try_parse_from(args.clone()).is_err(),
+                    "accepted {args:?}"
+                );
+            }
         }
         assert!(Cli::try_parse_from(["minecraft-analysis", "nbt", "dump", "file.dat"]).is_ok());
     }
