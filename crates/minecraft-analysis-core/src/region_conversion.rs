@@ -5,11 +5,12 @@ use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use crate::convert::{self, TransformObject};
+use crate::convert;
 use crate::nbt::{self, Value};
 use crate::region::{BlockStorage, RegionReader, RegionWriter, DEFAULT_MAX_CHUNK_BYTES};
 use crate::registry::{RegistryCatalog, RegistryKind};
-use crate::rules::{self, Decision, LoadedRules};
+use crate::rules::{self, LoadedRules};
+use crate::template::{BlockContext, BlockOriginal, BlockResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -245,7 +246,7 @@ fn convert_chunk(
     let chunk_x = int(level, "xPos");
     let chunk_z = int(level, "zPos");
     let chunk = [chunk_x, chunk_z];
-    let mut entity_decisions = BTreeMap::new();
+    let mut entity_results = BTreeMap::<[i32; 3], Option<Value>>::new();
     let Some(Value::List(sections)) = level.get_mut("Sections") else {
         return Ok(());
     };
@@ -283,7 +284,7 @@ fn convert_chunk(
             let associated = block_entities
                 .get(&local)
                 .map(|(name, nbt)| (name.as_str(), nbt));
-            let coordinated = rules::evaluate_coordinated_block(
+            let coordinated = rules::evaluate_coordinated_block_for_execution(
                 loaded,
                 &RegistryKind::Block,
                 &source_entry.name,
@@ -292,18 +293,27 @@ fn convert_chunk(
                 None,
                 associated,
             );
-            if let Some(decision) = coordinated.block_entity {
-                entity_decisions.insert(local, decision);
-            }
-            let applied = convert::apply_decision_with_maps(
+            let rendered = rules::render_block(
+                loaded,
                 &coordinated.block,
-                TransformObject {
-                    identity: source_entry.name.to_string(),
-                    numeric: i64::from(storage.metadata[index]),
-                    nbt: None,
+                BlockContext {
+                    original: BlockOriginal {
+                        name: source_entry.name.to_string(),
+                        numeric_id: i32::from(source_id),
+                        metadata: storage.metadata[index],
+                        nbt: None,
+                        block_entity: associated.map(|(_, value)| rules::typed_nbt(value)),
+                    },
                 },
-                &loaded.value_maps,
-                |name| target_name_exists(target_catalog, name),
+                rules::template_callbacks(
+                    loaded,
+                    source_catalog,
+                    target_catalog,
+                    rules::NestedLimits {
+                        max_depth: 64,
+                        max_objects: 4096,
+                    },
+                ),
             )
             .map_err(|source| Error::Convert {
                 file: relative_path.to_owned(),
@@ -311,23 +321,46 @@ fn convert_chunk(
                 chunk,
                 block: local,
                 identity: source_entry.name.to_string(),
-                rule_chain: selected_rules(&coordinated.block),
-                source: Box::new(source),
+                rule_chain: coordinated
+                    .block
+                    .selected
+                    .as_ref()
+                    .map(|v| vec![v.rule.id.clone()])
+                    .unwrap_or_default(),
+                source: Box::new(convert::Error::Template {
+                    source: Box::new(source),
+                }),
             })?;
-            let Some(object) = applied.object else {
-                storage.ids[index] = 0;
-                storage.metadata[index] = 0;
-                continue;
+            let has_template_result = rendered.is_some();
+            let (target_identity, target_metadata, target_entity) = match rendered {
+                None | Some(BlockResult::Unchanged) => (
+                    source_entry.name.to_string(),
+                    storage.metadata[index],
+                    associated.map(|(_, value)| value.clone()),
+                ),
+                Some(BlockResult::ReplaceWithAir) => ("minecraft:air".into(), 0, None),
+                Some(BlockResult::Transform {
+                    block,
+                    block_entity,
+                }) => (block.name, block.metadata, block_entity.map(Value::from)),
             };
+            if has_template_result {
+                entity_results.insert(local, target_entity);
+            }
             let target_name =
-                crate::registry::RegistryName::parse(&object.identity).map_err(|source| {
+                crate::registry::RegistryName::parse(&target_identity).map_err(|source| {
                     Error::Convert {
                         file: relative_path.to_owned(),
                         dimension: dimension.clone(),
                         chunk,
                         block: local,
-                        identity: object.identity.clone(),
-                        rule_chain: selected_rules(&coordinated.block),
+                        identity: target_identity.clone(),
+                        rule_chain: coordinated
+                            .block
+                            .selected
+                            .as_ref()
+                            .map(|v| vec![v.rule.id.clone()])
+                            .unwrap_or_default(),
                         source: Box::new(convert::Error::Unresolved {
                             identity: source.to_string(),
                         }),
@@ -341,10 +374,15 @@ fn convert_chunk(
                     dimension: dimension.clone(),
                     chunk,
                     block: local,
-                    identity: object.identity.clone(),
-                    rule_chain: selected_rules(&coordinated.block),
+                    identity: target_identity.clone(),
+                    rule_chain: coordinated
+                        .block
+                        .selected
+                        .as_ref()
+                        .map(|v| vec![v.rule.id.clone()])
+                        .unwrap_or_default(),
                     source: Box::new(convert::Error::Unresolved {
-                        identity: object.identity.clone(),
+                        identity: target_identity.clone(),
                     }),
                 })?;
             storage.ids[index] = u16::try_from(target_id)
@@ -355,21 +393,30 @@ fn convert_chunk(
                     dimension: dimension.clone(),
                     chunk,
                     block: local,
-                    identity: object.identity.clone(),
+                    identity: target_identity.clone(),
                     id: target_id,
-                    rule_chain: selected_rules(&coordinated.block),
+                    rule_chain: coordinated
+                        .block
+                        .selected
+                        .as_ref()
+                        .map(|v| vec![v.rule.id.clone()])
+                        .unwrap_or_default(),
                 })?;
-            storage.metadata[index] = u8::try_from(object.numeric)
-                .ok()
-                .filter(|value| *value <= 0x0f)
+            storage.metadata[index] = (target_metadata <= 0x0f)
+                .then_some(target_metadata)
                 .ok_or_else(|| Error::TargetRange {
                     file: relative_path.to_owned(),
                     dimension: dimension.clone(),
                     chunk,
                     block: local,
-                    identity: object.identity.clone(),
-                    id: i32::try_from(object.numeric).unwrap_or(i32::MAX),
-                    rule_chain: selected_rules(&coordinated.block),
+                    identity: target_identity.clone(),
+                    id: i32::from(target_metadata),
+                    rule_chain: coordinated
+                        .block
+                        .selected
+                        .as_ref()
+                        .map(|v| vec![v.rule.id.clone()])
+                        .unwrap_or_default(),
                 })?;
         }
         storage
@@ -379,14 +426,7 @@ fn convert_chunk(
                 source: Box::new(source),
             })?;
     }
-    apply_block_entity_decisions(
-        relative_path,
-        dimension,
-        chunk,
-        level,
-        &entity_decisions,
-        loaded,
-    )?;
+    apply_block_entity_results(level, &entity_results);
     Ok(())
 }
 
@@ -408,17 +448,21 @@ fn block_entity_snapshot(level: &BTreeMap<String, Value>) -> BTreeMap<[i32; 3], 
     result
 }
 
-fn apply_block_entity_decisions(
-    relative_path: &str,
-    dimension: &crate::world::DimensionId,
-    chunk: [i32; 2],
+fn apply_block_entity_results(
     level: &mut BTreeMap<String, Value>,
-    decisions: &BTreeMap<[i32; 3], Decision>,
-    loaded: &LoadedRules,
-) -> Result<()> {
-    let Some(Value::List(list)) = level.get_mut("TileEntities") else {
-        return Ok(());
-    };
+    results: &BTreeMap<[i32; 3], Option<Value>>,
+) {
+    if results.is_empty() {
+        return;
+    }
+    let list = level.entry("TileEntities".into()).or_insert_with(|| {
+        Value::List(crate::nbt::List {
+            element_tag: crate::nbt::Tag::Compound,
+            values: Vec::new(),
+        })
+    });
+    let Value::List(list) = list else { return };
+    let mut pending = results.clone();
     let mut retained = Vec::with_capacity(list.values.len());
     for value in std::mem::take(&mut list.values) {
         let Value::Compound(entity) = &value else {
@@ -426,54 +470,30 @@ fn apply_block_entity_decisions(
             continue;
         };
         let coordinate = [int(entity, "x"), int(entity, "y"), int(entity, "z")];
-        let Some(decision) = decisions.get(&coordinate) else {
+        let Some(result) = pending.remove(&coordinate) else {
             retained.push(value);
             continue;
         };
-        let identity = match entity.get("id") {
-            Some(Value::String(value)) => value.clone(),
-            _ => String::new(),
-        };
-        let applied = convert::apply_decision_with_maps(
-            decision,
-            TransformObject {
-                identity: identity.clone(),
-                numeric: 0,
-                nbt: Some(value),
-            },
-            &loaded.value_maps,
-            |_| true,
-        )
-        .map_err(|source| Error::BlockEntity {
-            file: relative_path.to_owned(),
-            dimension: dimension.clone(),
-            chunk,
-            block: coordinate,
-            identity,
-            rule_chain: selected_rules(decision),
-            source: Box::new(source),
-        })?;
-        let Some(mut object) = applied.object else {
-            continue;
-        };
-        if let Some(Value::Compound(entity)) = object.nbt.as_mut() {
-            entity.insert("id".into(), Value::String(object.identity));
+        if let Some(mut nbt) = result {
+            normalize_block_entity_coordinates(&mut nbt, coordinate);
+            retained.push(nbt);
         }
-        if let Some(nbt) = object.nbt {
+    }
+    for (coordinate, result) in pending {
+        if let Some(mut nbt) = result {
+            normalize_block_entity_coordinates(&mut nbt, coordinate);
             retained.push(nbt);
         }
     }
     list.values = retained;
-    Ok(())
 }
 
-fn target_name_exists(catalog: &RegistryCatalog, name: &str) -> bool {
-    crate::registry::RegistryName::parse(name)
-        .is_ok_and(|name| catalog.by_name(&RegistryKind::Block, &name).is_some())
-}
-
-fn selected_rules(decision: &Decision) -> Vec<String> {
-    decision.actions.iter().map(|(id, _)| id.clone()).collect()
+fn normalize_block_entity_coordinates(value: &mut Value, [x, y, z]: [i32; 3]) {
+    if let Value::Compound(entity) = value {
+        entity.insert("x".into(), Value::Int(x));
+        entity.insert("y".into(), Value::Int(y));
+        entity.insert("z".into(), Value::Int(z));
+    }
 }
 
 fn chunk_coordinates(
@@ -558,8 +578,8 @@ mod tests {
             source_profile: crate::rules::SourceProfile::Forge1_7_10,
             documents: vec![],
             ordered_rules: vec![],
-            standalone_inventories: vec![],
             value_maps: BTreeMap::new(),
+            ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
         };
         let output = convert_region_bytes(
             Path::new("r.0.0.mca"),
@@ -598,8 +618,8 @@ mod tests {
             source_profile: crate::rules::SourceProfile::Forge1_7_10,
             documents: vec![],
             ordered_rules: vec![],
-            standalone_inventories: vec![],
             value_maps: BTreeMap::new(),
+            ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
         };
         let expected_len = input.len();
         for index in 0..256 {
@@ -654,11 +674,50 @@ mod tests {
                 source_profile: crate::rules::SourceProfile::Forge1_7_10,
                 documents: vec![],
                 ordered_rules: vec![],
-                standalone_inventories: vec![],
                 value_maps: BTreeMap::new(),
+                ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
             },
         )
         .unwrap_err();
         assert!(matches!(error, Error::TargetRange { id: 4096, .. }));
+    }
+
+    #[test]
+    fn coordinated_block_entity_results_cover_all_presence_transitions_and_normalize_coordinates() {
+        let entity = |id: &str, coordinate: [i32; 3]| {
+            Value::Compound(BTreeMap::from([
+                ("id".into(), Value::String(id.into())),
+                ("x".into(), Value::Int(coordinate[0])),
+                ("y".into(), Value::Int(coordinate[1])),
+                ("z".into(), Value::Int(coordinate[2])),
+            ]))
+        };
+        let mut level = BTreeMap::from([(
+            "TileEntities".into(),
+            Value::List(List {
+                element_tag: Tag::Compound,
+                values: vec![
+                    entity("old:keep", [1, 2, 3]),
+                    entity("old:delete", [4, 5, 6]),
+                ],
+            }),
+        )]);
+        apply_block_entity_results(
+            &mut level,
+            &BTreeMap::from([
+                ([1, 2, 3], Some(entity("new:replace", [90, 91, 92]))),
+                ([4, 5, 6], None),
+                ([7, 8, 9], Some(entity("new:create", [0, 0, 0]))),
+            ]),
+        );
+        let snapshot = block_entity_snapshot(&level);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[&[1, 2, 3]].0, "new:replace");
+        assert_eq!(snapshot[&[7, 8, 9]].0, "new:create");
+        assert!(!snapshot.contains_key(&[4, 5, 6]));
+
+        let unchanged = level.clone();
+        apply_block_entity_results(&mut level, &BTreeMap::new());
+        assert_eq!(level, unchanged);
     }
 }
