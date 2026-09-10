@@ -362,6 +362,13 @@ impl<'a> App<'a> {
         }
     }
 
+    fn select_initial_block(&mut self, position: usize) {
+        self.block_state.selected = position;
+        self.block_state.reveal_filtered = self.blocks.and_then(|index| {
+            (index.records()[position].id == 0 && !self.block_state.show_air).then_some(position)
+        });
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -832,6 +839,7 @@ pub fn run(
     source: &Source,
     document: &Document,
     identity: Option<&IdentityContext>,
+    initial_block: Option<[i32; 3]>,
 ) -> miette::Result<()> {
     let block_result = match (source, identity) {
         (Source::RegionChunk { selection, .. }, Some(identity)) => Some(BlockIndex::build(
@@ -843,12 +851,32 @@ pub fn run(
     };
     let (block_index, unavailable) = match block_result.as_ref() {
         Some(Ok(index)) => (Some(index), None),
+        Some(Err(error)) if initial_block.is_some() => {
+            return Err(miette!("cannot select requested block: {error}"));
+        }
         Some(Err(error)) => (None, Some(error.to_string())),
         None => (None, None),
     };
+    let initial_position = initial_block
+        .map(|coordinate| {
+            block_index
+                .and_then(|index| index.position(coordinate))
+                .ok_or_else(|| {
+                    miette!(
+                        "no stored block is indexed at requested coordinate ({},{},{})",
+                        coordinate[0],
+                        coordinate[1],
+                        coordinate[2]
+                    )
+                })
+        })
+        .transpose()?;
     let mut session = Session::enter()
         .map_err(|error| miette!("cannot initialize NBT viewer terminal: {error}"))?;
     let mut app = App::new(document, block_index, unavailable);
+    if let Some(position) = initial_position {
+        app.select_initial_block(position);
+    }
     let application = (|| -> io::Result<()> {
         while !app.quit {
             session
@@ -1150,6 +1178,20 @@ mod tests {
         assert_eq!(app.visible_block_indices(), vec![0, 1]);
         app.apply(Action::ToggleAir);
         assert_eq!(app.visible_block_indices().len(), 4096);
+    }
+
+    #[test]
+    fn initial_block_selection_highlights_non_air_and_reveals_air() {
+        let document = block_document();
+        let index = BlockIndex::build(&document, [0, 0], &RegistryCatalog::default()).unwrap();
+        let mut app = App::new(&document, Some(&index), None);
+        app.select_initial_block(1);
+        assert_eq!(app.block_state.selected, 1);
+        assert_eq!(app.block_state.reveal_filtered, Some(1));
+        assert!(app.visible_block_indices().contains(&1));
+        app.select_initial_block(0);
+        assert_eq!(app.block_state.selected, 0);
+        assert_eq!(app.block_state.reveal_filtered, None);
     }
 
     #[test]

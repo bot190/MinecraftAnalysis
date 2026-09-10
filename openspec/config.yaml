@@ -30,3 +30,10 @@ schema: spec-driven
 #     archive:
 #       guidance:
 #         - Summarize the archive outcome before finishing
+
+operations:
+  archive:
+    guidance:
+      - After successfully syncing specs and archiving the change, commit all changes associated with the archived change.
+      - Use Conventional Commits syntax and do not include unrelated working-tree changes.
+      - Include the archived specifications and implementation changes in the same commit.

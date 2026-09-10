@@ -20,13 +20,21 @@ deterministic, pretty-printed SNBT:
 cargo run -p minecraft-analysis -- nbt dump /path/to/document.nbt
 ```
 
-Select one chunk from an Anvil region using global chunk coordinates or
-region-local coordinates (0 through 31):
+Inspect one stored block by its world-global coordinate, optionally selecting a
+dimension and supplying source transformation rules for additional registry
+context:
 
 ```bash
-cargo run -p minecraft-analysis -- nbt dump /world/region/r.-1.0.mca --chunk=-1,4
-cargo run -p minecraft-analysis -- nbt dump /world/region/r.-1.0.mca --local-chunk 31,4
+cargo run -p minecraft-analysis -- nbt dump --world /world --location=-1,64,4
+cargo run -p minecraft-analysis -- nbt dump --world /world --location=-1,64,4 --dimension nether --rules rules.json
 ```
+
+World-coordinate output is a stable labeled block record rather than a complete
+chunk document. Registry names are resolved from the world's Forge registry,
+optional repeatable `--rules` source manifests, and version-appropriate vanilla
+defaults. An unknown numeric ID is still dumped and is labeled `unresolved`.
+The former region-file `--chunk` and `--local-chunk` modes and dump-specific
+`--source-rule` and `--target-rule` options have been removed.
 
 The command writes SNBT to standard output with a trailing newline, making it
 suitable for terminal inspection or shell redirection. It automatically reads
@@ -56,11 +64,12 @@ terminal tree:
 cargo run -p minecraft-analysis -- nbt view /path/to/document.nbt
 ```
 
-The interactive viewer accepts the same region selectors and displays the
-region path, chunk compression, binary root name, and both coordinate forms:
+Open the chunk containing a world-global block and highlight that block
+initially. The dimension defaults to the overworld, and optional repeatable
+rules enrich source block identities:
 
 ```bash
-cargo run -p minecraft-analysis -- nbt view /world/region/r.0.0.mca --chunk 12,9
+cargo run -p minecraft-analysis -- nbt view --world /world --location 12,64,9 --rules rules.json
 ```
 
 The viewer automatically detects uncompressed, gzip-compressed, and
@@ -70,9 +79,10 @@ move to a parent, Right/`l` to expand or move to the first child, Enter to
 toggle a container, and `q` or Escape to exit. Typed arrays appear as bounded
 previews rather than one row per element.
 
-This first version is intentionally read-only and has no search, editing,
-mouse input, export, details pane, or world-coordinate lookup. Invalid input is
-diagnosed before raw mode or the alternate screen is entered.
+The viewer is read-only and has no editing, mouse input, or export. Invalid
+input and an unavailable requested block are diagnosed before raw mode or the
+alternate screen is entered. Direct region-file selectors are no longer
+supported; use `--world`, `--location`, and optional `--dimension` instead.
 
 ## Development
 
