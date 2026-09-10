@@ -16,7 +16,7 @@ fastanvil = { version = "0.32", default-features = false }
 fastnbt = "2.6"
 flate2 = "1.1"
 hex = "0.4"
-indicatif = "0.17"
+indicatif = "0.18"
 miette = { version = "7.6", features = ["fancy"] }
 ratatui = "0.30"
 proptest = "1.7"
