@@ -6,10 +6,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::convert::{self, TransformObject};
+use crate::convert;
 use crate::nbt::{self, Document, Value};
 use crate::registry::{RegistryCatalog, RegistryKind, RegistryName};
-use crate::rules::{self, ExecutionDecision, LoadedRules, NestedLimits, ObjectAction, PathElement};
+use crate::rules::{self, ExecutionDecision, LoadedRules, NestedLimits};
+use crate::template::{
+    EntityContext, EntityOriginal, EntityResult, ItemContext, ItemOriginal, ItemResult,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -198,16 +201,13 @@ pub fn convert_document(
     loaded: &LoadedRules,
     limits: NestedLimits,
 ) -> Result<()> {
-    let resolution = crate::inventory::resolve(
-        document,
-        &path.to_string_lossy(),
-        &loaded.standalone_inventories,
-        limits,
-    )
-    .map_err(|source| Error::Inventory {
-        path: path.to_owned(),
-        source,
-    })?;
+    let resolution =
+        crate::inventory::resolve(document, &path.to_string_lossy(), limits).map_err(|source| {
+            Error::Inventory {
+                path: path.to_owned(),
+                source,
+            }
+        })?;
     let root = &mut document.root;
     for inventory_path in resolution.inventories {
         let Some(Value::List(list)) = crate::inventory::value_at_root_mut(root, &inventory_path)
@@ -269,89 +269,53 @@ fn convert_named_list(
             retained.push(value);
             continue;
         };
-        let decision = if block_entity {
-            rules::evaluate_block_entity_for_execution(loaded, &name, &value)
-        } else {
-            rules::evaluate_entity_for_execution(loaded, &name, &value)
-        };
-        let applied = convert::apply_execution_decision_with_maps(
+        if block_entity {
+            retained.push(value);
+            continue;
+        }
+        let decision = rules::evaluate_entity_for_execution(loaded, &name, &value);
+        let rendered = rules::render_entity(
+            loaded,
             &decision,
-            TransformObject {
-                identity: name,
-                numeric: 0,
-                nbt: Some(value),
+            EntityContext {
+                original: EntityOriginal {
+                    name: name.clone(),
+                    nbt: rules::typed_nbt(&value),
+                },
             },
-            &loaded.value_maps,
-            |_| true,
+            rules::template_callbacks(loaded, source, target, limits),
         )
-        .map_err(|source| Error::Convert {
+        .map_err(|source| Error::Rules {
             path: path.to_owned(),
             source: Box::new(source),
         })?;
-        let Some(mut object) = applied.object else {
-            continue;
-        };
-        let Some(Value::Compound(entity)) = object.nbt.as_mut() else {
-            continue;
-        };
-        entity.insert("id".into(), Value::String(object.identity));
-        for item_field in [
-            "Items",
-            "Inventory",
-            "EnderItems",
-            "Equipment",
-            "HandItems",
-            "ArmorItems",
-        ] {
-            convert_item_list_field(
-                path,
-                entity,
-                item_field,
-                source,
-                target,
-                loaded,
-                limits,
-                format!("{field}[{entity_index}].{item_field}"),
-            )?;
-        }
-        if let Some(item) = entity.remove("Item") {
-            if let Some(item) = convert_item(
-                path,
-                item,
-                source,
-                target,
-                loaded,
-                limits,
-                1,
-                &mut Vec::new(),
-                &format!("{field}[{entity_index}].Item"),
-            )? {
-                entity.insert("Item".into(), item);
+        let entity_value = match rendered {
+            None | Some(EntityResult::Unchanged) => value,
+            Some(EntityResult::Delete) => continue,
+            Some(EntityResult::Transform { entity }) => {
+                let target_name = RegistryName::parse(&entity.name).map_err(|_| Error::Item {
+                    path: path.to_owned(),
+                    nbt_path: format!("{field}[{entity_index}]"),
+                    identity: entity.name.clone(),
+                    rule_chain: decision
+                        .selected
+                        .as_ref()
+                        .map(|v| vec![v.rule.id.clone()])
+                        .unwrap_or_default(),
+                    source: ItemFailure::MissingTarget,
+                })?;
+                let _ = target_name;
+                let mut nbt = Value::from(entity.nbt);
+                if let Value::Compound(compound) = &mut nbt {
+                    compound.insert("id".into(), Value::String(entity.name));
+                }
+                nbt
             }
-        }
-        if let Some(nbt) = object.nbt {
-            retained.push(nbt);
-        }
+        };
+        retained.push(entity_value);
     }
     list.values = retained;
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn convert_item_list_field(
-    path: &Path,
-    root: &mut BTreeMap<String, Value>,
-    field: &str,
-    source: &RegistryCatalog,
-    target: &RegistryCatalog,
-    loaded: &LoadedRules,
-    limits: NestedLimits,
-    nbt_path: String,
-) -> Result<()> {
-    let Some(Value::List(list)) = root.get_mut(field) else {
-        return Ok(());
-    };
-    convert_item_list(path, list, source, target, loaded, limits, nbt_path)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -373,7 +337,6 @@ fn convert_item_list(
             target,
             loaded,
             limits,
-            1,
             &mut Vec::new(),
             &format!("{nbt_path}[{index}]"),
         )? {
@@ -392,19 +355,9 @@ fn convert_item(
     target: &RegistryCatalog,
     loaded: &LoadedRules,
     limits: NestedLimits,
-    depth: usize,
-    chain: &mut Vec<String>,
+    chain: &mut [String],
     nbt_path: &str,
 ) -> Result<Option<Value>> {
-    if depth > limits.max_depth {
-        return Err(Error::Rules {
-            path: path.to_owned(),
-            source: Box::new(rules::Error::NestedDepth {
-                limit: limits.max_depth,
-                chain: chain.clone(),
-            }),
-        });
-    }
     let Value::Compound(compound) = &item else {
         return Ok(Some(item));
     };
@@ -412,7 +365,7 @@ fn convert_item(
         path: path.to_owned(),
         nbt_path: nbt_path.to_owned(),
         identity: item_id_display(compound),
-        rule_chain: chain.clone(),
+        rule_chain: chain.to_owned(),
         source: ItemFailure::MissingSource,
     })?;
     let decision = rules::evaluate_item_for_execution(
@@ -424,33 +377,43 @@ fn convert_item(
         numeric(compound, "Count"),
         Some(&item),
     );
-    let applied = convert::apply_execution_decision_with_maps(
+    let rendered = rules::render_item(
+        loaded,
         &decision,
-        TransformObject {
-            identity: source_name.to_string(),
-            numeric: i64::from(numeric(compound, "Damage")),
-            nbt: Some(item),
+        ItemContext {
+            original: ItemOriginal {
+                name: source_name.to_string(),
+                numeric_id,
+                count: i8::try_from(numeric(compound, "Count")).unwrap_or_default(),
+                damage: i16::try_from(numeric(compound, "Damage")).unwrap_or_default(),
+                nbt: rules::typed_nbt(&item),
+            },
         },
-        &loaded.value_maps,
-        |name| {
-            RegistryName::parse(name)
-                .is_ok_and(|name| target.by_name(&RegistryKind::Item, &name).is_some())
-        },
+        rules::template_callbacks(loaded, source, target, limits),
     )
     .map_err(|source| Error::Item {
         path: path.to_owned(),
         nbt_path: nbt_path.to_owned(),
         identity: source_name.to_string(),
         rule_chain: selected_rules(&decision, chain),
-        source: ItemFailure::Conversion(Box::new(source)),
+        source: ItemFailure::Conversion(Box::new(convert::Error::Template {
+            source: Box::new(source),
+        })),
     })?;
-    let Some(mut object) = applied.object else {
-        return Ok(None);
+    let target_item = match rendered {
+        Some(ItemResult::Drop) => return Ok(None),
+        Some(ItemResult::Transform { item }) => item,
+        None | Some(ItemResult::Unchanged) => crate::template::TargetItem {
+            name: source_name.to_string(),
+            count: i8::try_from(numeric(compound, "Count")).unwrap_or_default(),
+            damage: i16::try_from(numeric(compound, "Damage")).unwrap_or_default(),
+            nbt: rules::typed_nbt(&item),
+        },
     };
-    let target_name = RegistryName::parse(&object.identity).map_err(|_| Error::Item {
+    let target_name = RegistryName::parse(&target_item.name).map_err(|_| Error::Item {
         path: path.to_owned(),
         nbt_path: nbt_path.to_owned(),
-        identity: object.identity.clone(),
+        identity: target_item.name.clone(),
         rule_chain: selected_rules(&decision, chain),
         source: ItemFailure::MissingTarget,
     })?;
@@ -460,150 +423,30 @@ fn convert_item(
         .ok_or_else(|| Error::Item {
             path: path.to_owned(),
             nbt_path: nbt_path.to_owned(),
-            identity: object.identity.clone(),
+            identity: target_item.name.clone(),
             rule_chain: selected_rules(&decision, chain),
             source: ItemFailure::MissingTarget,
         })?;
-    let Some(Value::Compound(compound)) = object.nbt.as_mut() else {
-        return Ok(object.nbt);
+    let mut output = Value::from(target_item.nbt);
+    let Value::Compound(compound) = &mut output else {
+        return Ok(Some(output));
     };
-    write_item_id(compound, target_id, &object.identity);
-    write_numeric_like(compound, "Damage", object.numeric).map_err(|value| Error::Item {
-        path: path.to_owned(),
-        nbt_path: nbt_path.to_owned(),
-        identity: object.identity.clone(),
-        rule_chain: selected_rules(&decision, chain),
-        source: ItemFailure::NumericRange {
-            field: "Damage",
-            value,
-        },
+    write_item_id(compound, target_id, &target_item.name);
+    compound.insert("Count".into(), Value::Byte(target_item.count));
+    compound.insert("Damage".into(), Value::Short(target_item.damage));
+    write_numeric_like(compound, "Damage", i64::from(target_item.damage)).map_err(|value| {
+        Error::Item {
+            path: path.to_owned(),
+            nbt_path: nbt_path.to_owned(),
+            identity: target_item.name.clone(),
+            rule_chain: selected_rules(&decision, chain),
+            source: ItemFailure::NumericRange {
+                field: "Damage",
+                value,
+            },
+        }
     })?;
-    process_declared_paths(
-        path, compound, &decision, source, target, loaded, limits, depth, chain, nbt_path,
-    )?;
-    Ok(object.nbt)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_declared_paths(
-    path: &Path,
-    root: &mut BTreeMap<String, Value>,
-    decision: &ExecutionDecision<'_>,
-    source: &RegistryCatalog,
-    target: &RegistryCatalog,
-    loaded: &LoadedRules,
-    limits: NestedLimits,
-    depth: usize,
-    chain: &mut Vec<String>,
-    nbt_path: &str,
-) -> Result<()> {
-    let declarations = decision
-        .actions
-        .iter()
-        .filter_map(|selected| match selected.action {
-            ObjectAction::Transform { nested_items, .. } if !nested_items.is_empty() => {
-                Some((selected.rule_id, nested_items))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for (rule_id, paths) in declarations {
-        if chain.iter().any(|selected| selected == rule_id) {
-            let mut cycle = chain.clone();
-            cycle.push(rule_id.to_owned());
-            return Err(Error::Rules {
-                path: path.to_owned(),
-                source: Box::new(rules::Error::NestedCycle { chain: cycle }),
-            });
-        }
-        chain.push(rule_id.to_owned());
-        for nested_path in paths {
-            convert_at_path(
-                path,
-                root,
-                &nested_path.0,
-                source,
-                target,
-                loaded,
-                limits,
-                depth + 1,
-                chain,
-                &format!("{nbt_path}.{nested_path:?}"),
-            )?;
-        }
-        chain.pop();
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn convert_at_path(
-    file: &Path,
-    root: &mut BTreeMap<String, Value>,
-    path: &[PathElement],
-    source: &RegistryCatalog,
-    target: &RegistryCatalog,
-    loaded: &LoadedRules,
-    limits: NestedLimits,
-    depth: usize,
-    chain: &mut Vec<String>,
-    nbt_path: &str,
-) -> Result<()> {
-    let Some((first, rest)) = path.split_first() else {
-        return Ok(());
-    };
-    let PathElement::Field(field) = first else {
-        return Ok(());
-    };
-    if rest.is_empty() {
-        let Some(value) = root.remove(field) else {
-            return Ok(());
-        };
-        let converted = match value {
-            Value::List(mut list) => {
-                let mut retained = Vec::new();
-                for item in list.values {
-                    if retained.len() >= limits.max_objects {
-                        return Err(Error::Rules {
-                            path: file.to_owned(),
-                            source: Box::new(rules::Error::NestedCount {
-                                limit: limits.max_objects,
-                                chain: chain.clone(),
-                            }),
-                        });
-                    }
-                    if let Some(item) = convert_item(
-                        file, item, source, target, loaded, limits, depth, chain, nbt_path,
-                    )? {
-                        retained.push(item);
-                    }
-                }
-                list.values = retained;
-                Some(Value::List(list))
-            }
-            item @ Value::Compound(_) => convert_item(
-                file, item, source, target, loaded, limits, depth, chain, nbt_path,
-            )?,
-            _ => {
-                return Err(Error::Rules {
-                    path: file.to_owned(),
-                    source: Box::new(rules::Error::NestedType {
-                        path: rules::NbtPath(path.to_vec()),
-                    }),
-                })
-            }
-        };
-        if let Some(value) = converted {
-            root.insert(field.clone(), value);
-        }
-        return Ok(());
-    }
-    let Some(Value::Compound(next)) = root.get_mut(field) else {
-        return Ok(());
-    };
-    convert_at_path(
-        file, next, rest, source, target, loaded, limits, depth, chain, nbt_path,
-    )
+    Ok(Some(output))
 }
 
 fn resolve_item(
@@ -668,9 +511,9 @@ fn selected_rules(decision: &ExecutionDecision<'_>, chain: &[String]) -> Vec<Str
         .cloned()
         .chain(
             decision
-                .actions
+                .selected
                 .iter()
-                .map(|selected| selected.rule_id.to_owned()),
+                .map(|selected| selected.rule.id.clone()),
         )
         .collect()
 }
@@ -722,8 +565,8 @@ mod tests {
                 source_profile: crate::rules::SourceProfile::Forge1_7_10,
                 documents: vec![],
                 ordered_rules: vec![],
-                standalone_inventories: vec![],
                 value_maps: BTreeMap::new(),
+                ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
             },
             NestedLimits {
                 max_depth: 8,
@@ -743,64 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_declared_wrapped_inventory_and_preserves_incompatible_container() {
-        let declared = rules::NbtPath(vec![
-            PathElement::Field("Inventory".into()),
-            PathElement::Field("Items".into()),
-        ]);
-        let metadata = Value::ByteArray(vec![4, 2]);
-        let mut document = Document {
-            root_name: String::new(),
-            root: BTreeMap::from([(
-                "Inventory".into(),
-                Value::Compound(BTreeMap::from([
-                    (
-                        "Items".into(),
-                        Value::List(List {
-                            element_tag: Tag::Compound,
-                            values: vec![Value::Compound(BTreeMap::from([(
-                                "id".into(),
-                                Value::Short(20),
-                            )]))],
-                        }),
-                    ),
-                    ("Metadata".into(), metadata.clone()),
-                ])),
-            )]),
-        };
-        convert_document(
-            Path::new("death.dat"),
-            &mut document,
-            &catalog("mod:item", 20),
-            &catalog("mod:item", 500),
-            &LoadedRules {
-                source_profile: crate::rules::SourceProfile::Forge1_7_10,
-                documents: vec![],
-                ordered_rules: vec![],
-                standalone_inventories: vec![declared],
-                value_maps: BTreeMap::new(),
-            },
-            NestedLimits {
-                max_depth: 8,
-                max_objects: 10,
-            },
-        )
-        .unwrap();
-        let Value::Compound(wrapper) = &document.root["Inventory"] else {
-            panic!()
-        };
-        assert_eq!(wrapper["Metadata"], metadata);
-        let Value::List(items) = &wrapper["Items"] else {
-            panic!()
-        };
-        let Value::Compound(item) = &items.values[0] else {
-            panic!()
-        };
-        assert_eq!(item["id"], Value::Short(500));
-    }
-
-    #[test]
-    fn entity_held_item_missing_from_target_reports_typed_path_and_identity() {
+    fn entity_embedded_items_are_preserved_without_template_calls() {
         let mut document = Document {
             root_name: String::new(),
             root: BTreeMap::from([(
@@ -826,7 +612,7 @@ mod tests {
                 )])),
             )]),
         };
-        let error = convert_document(
+        convert_document(
             Path::new("region/r.0.0.mca"),
             &mut document,
             &catalog("mod:item", 20),
@@ -835,20 +621,31 @@ mod tests {
                 source_profile: crate::rules::SourceProfile::Forge1_7_10,
                 documents: vec![],
                 ordered_rules: vec![],
-                standalone_inventories: vec![],
                 value_maps: BTreeMap::new(),
+                ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
             },
             NestedLimits {
                 max_depth: 8,
                 max_objects: 100,
             },
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("region/r.0.0.mca"), "{error}");
-        assert!(error.contains("Entities[0].HandItems[0]"), "{error}");
-        assert!(error.contains("mod:item"), "{error}");
-        assert!(error.contains("no target mapping"), "{error}");
+        .unwrap();
+        let Value::Compound(level) = &document.root["Level"] else {
+            panic!()
+        };
+        let Value::List(entities) = &level["Entities"] else {
+            panic!()
+        };
+        let Value::Compound(entity) = &entities.values[0] else {
+            panic!()
+        };
+        let Value::List(items) = &entity["HandItems"] else {
+            panic!()
+        };
+        let Value::Compound(item) = &items.values[0] else {
+            panic!()
+        };
+        assert_eq!(item["id"], Value::Short(20));
     }
 
     #[test]

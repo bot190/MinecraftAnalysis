@@ -4,13 +4,12 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::convert::{self, TransformObject};
 use crate::nbt;
 use crate::progress::{NoProgress, ProgressActivity, ProgressEvent, ProgressObserver};
 use crate::region::{RegionReader, DEFAULT_MAX_CHUNK_BYTES};
 use crate::registry::{RegistryCatalog, RegistryKind, RegistryName};
 use crate::report::{Disposition, InputFingerprint, ObjectLocation, ObjectRecord};
-use crate::rules::{self, LoadedRules, ObjectAction};
+use crate::rules::{self, LoadedRules};
 use crate::traversal::{self, LocatedObject, ObjectKind};
 use crate::world::DimensionId;
 use sha2::{Digest, Sha256};
@@ -218,9 +217,6 @@ pub fn explain_at_coordinate_with_progress(
                 block,
             });
         }
-        let (selected, _) =
-            crate::coverage::expand_nested_items(selected, source_catalog, rules)
-                .map_err(|error| Error::Nested(format!("at {file} block {block:?}: {error}")))?;
         let block_entities = batch_block_entities(&selected);
         let mut records: Vec<_> = selected
             .into_iter()
@@ -345,7 +341,6 @@ fn run_observed(
     let mut accumulator = PreflightAccumulator::new(source_catalog, target_catalog, rules);
     let (source_digest, source_bytes, opaque_files, findings) = reduce_source_with_progress_config(
         source,
-        &rules.standalone_inventories,
         progress,
         execution,
         || PreflightAccumulator::new(source_catalog, target_catalog, rules),
@@ -369,7 +364,7 @@ fn run_observed(
 pub fn inventory_source(source: &Path) -> Result<SourceInventory> {
     let mut observed = Vec::new();
     let (source_digest, source_bytes, opaque_files, validation_findings) =
-        stream_source_batches(source, &[], |_, batch| {
+        stream_source_batches(source, |_, batch| {
             observed.extend(batch);
             Ok(())
         })?;
@@ -390,7 +385,6 @@ pub fn inventory_source(source: &Path) -> Result<SourceInventory> {
 /// Traverse and decode source observations in independently releasable batches.
 pub(crate) fn stream_source_batches(
     source: &Path,
-    standalone_inventories: &[rules::NbtPath],
     consume: impl FnMut(crate::work::WorkKey, Vec<LocatedObject>) -> Result<()>,
 ) -> Result<(
     String,
@@ -398,12 +392,11 @@ pub(crate) fn stream_source_batches(
     Vec<OpaqueFile>,
     Vec<crate::inventory::ValidationFinding>,
 )> {
-    stream_source_batches_with_progress(source, standalone_inventories, &NoProgress, consume)
+    stream_source_batches_with_progress(source, &NoProgress, consume)
 }
 
 pub(crate) fn stream_source_batches_with_progress(
     source: &Path,
-    standalone_inventories: &[rules::NbtPath],
     progress: &dyn ProgressObserver,
     consume: impl FnMut(crate::work::WorkKey, Vec<LocatedObject>) -> Result<()>,
 ) -> Result<(
@@ -414,7 +407,6 @@ pub(crate) fn stream_source_batches_with_progress(
 )> {
     stream_source_batches_with_progress_config(
         source,
-        standalone_inventories,
         progress,
         crate::work::ExecutionConfig::default(),
         consume,
@@ -424,7 +416,6 @@ pub(crate) fn stream_source_batches_with_progress(
 #[allow(clippy::too_many_lines, clippy::items_after_statements)]
 pub(crate) fn stream_source_batches_with_progress_config(
     source: &Path,
-    standalone_inventories: &[rules::NbtPath],
     progress: &dyn ProgressObserver,
     execution: crate::work::ExecutionConfig,
     mut consume: impl FnMut(crate::work::WorkKey, Vec<LocatedObject>) -> Result<()>,
@@ -436,7 +427,6 @@ pub(crate) fn stream_source_batches_with_progress_config(
 )> {
     reduce_source_with_progress_config(
         source,
-        standalone_inventories,
         progress,
         execution,
         Vec::new,
@@ -456,7 +446,6 @@ pub(crate) fn stream_source_batches_with_progress_config(
 #[allow(clippy::too_many_lines, clippy::items_after_statements)]
 pub(crate) fn reduce_source_with_progress_config<O>(
     source: &Path,
-    standalone_inventories: &[rules::NbtPath],
     progress: &dyn ProgressObserver,
     execution: crate::work::ExecutionConfig,
     new_reducer: impl Fn() -> O + Sync,
@@ -572,10 +561,9 @@ where
                         }));
                     }
                 };
-                let (batch, mut findings) = match traversal::scan_standalone_configured(
+                let (batch, mut findings) = match traversal::scan_standalone_bounded(
                     &document,
                     &entry.relative_path,
-                    standalone_inventories,
                     rules::NestedLimits {
                         max_depth: 32,
                         max_objects: 100_000,
@@ -822,9 +810,6 @@ impl<'a> PreflightAccumulator<'a> {
     }
 
     fn observe_batch(&mut self, batch: Vec<LocatedObject>) -> Result<()> {
-        let (batch, added) = crate::coverage::expand_nested_items(batch, self.source, self.loaded)
-            .map_err(|error| Error::Nested(error.to_string()))?;
-        self.observe_nested(added)?;
         let block_entities = batch_block_entities(&batch);
         for object in batch {
             let associated = associated_block_entity(&object, &block_entities);
@@ -980,55 +965,229 @@ fn assess(
             object.identity.as_deref().unwrap_or(""),
             object.nbt.as_ref().unwrap_or(&ValueHolder::EMPTY),
         ),
-        (ObjectKind::BlockEntity, _, _) => rules::evaluate_block_entity(
-            loaded,
-            object.identity.as_deref().unwrap_or(""),
-            object.nbt.as_ref().unwrap_or(&ValueHolder::EMPTY),
-        ),
         _ => rules::Decision {
-            actions: Vec::new(),
-            trace: Vec::new(),
+            selected_rule: None,
+            candidates: Vec::new(),
         },
     };
-    let selected_rules = decision.actions.iter().map(|(id, _)| id.clone()).collect();
-    let target_identity = final_identity(&source_identity, &decision);
-    let (disposition, diagnostic, value_maps) = if resolved.is_none() && kind.is_some() {
+    let selected_rules = decision.selected_rule.iter().cloned().collect();
+    let mut template_diagnostics = Vec::new();
+    let (target_identity, disposition, diagnostic, value_maps) = if resolved.is_none()
+        && kind.is_some()
+    {
         (
+            Some(source_identity.clone()),
             Disposition::Unresolved,
             Some("missing source registry mapping".into()),
             Vec::new(),
         )
-    } else if kind.is_none() {
-        match convert::apply_decision_with_maps(
-            &decision,
-            TransformObject {
-                identity: source_identity.clone(),
-                numeric: 0,
-                nbt: object.nbt.clone(),
-            },
-            &loaded.value_maps,
-            |_| true,
-        ) {
-            Ok(applied) => (applied.disposition, None, applied.map_outcomes),
-            Err(error) => (Disposition::Unresolved, Some(error.to_string()), Vec::new()),
+    } else if decision.selected_rule.is_some() {
+        let limits = rules::NestedLimits {
+            max_depth: 64,
+            max_objects: 100_000,
+        };
+        let session = rules::template_session(loaded, source, target, limits);
+        let callbacks = session.callbacks();
+        if let Some(rule_id) = &decision.selected_rule {
+            if let Some((index, _)) = loaded
+                .ordered_rules
+                .iter()
+                .enumerate()
+                .find(|(_, rule)| &rule.id == rule_id)
+            {
+                template_diagnostics.push(crate::report::TemplateDiagnostic::SelectedTemplate {
+                    rule_id: rule_id.clone(),
+                    template: loaded.template_names[index].clone(),
+                });
+            }
         }
+        let rendered: std::result::Result<(Option<String>, Disposition), rules::Error> =
+            match object.kind {
+                ObjectKind::Block => {
+                    let name = resolved.as_ref().expect("resolved block");
+                    let execution = rules::evaluate_coordinated_block_for_execution(
+                        loaded,
+                        &RegistryKind::Block,
+                        name,
+                        object.numeric_id.unwrap_or_default(),
+                        u8::try_from(object.data.unwrap_or_default()).unwrap_or_default(),
+                        object.nbt.as_ref(),
+                        associated.map(|(identity, value)| (identity.as_str(), value)),
+                    )
+                    .block;
+                    rules::render_block(
+                        loaded,
+                        &execution,
+                        crate::template::BlockContext {
+                            original: crate::template::BlockOriginal {
+                                name: name.to_string(),
+                                numeric_id: object.numeric_id.unwrap_or_default(),
+                                metadata: u8::try_from(object.data.unwrap_or_default())
+                                    .unwrap_or_default(),
+                                nbt: object.nbt.as_ref().map(rules::typed_nbt),
+                                block_entity: associated.map(|(_, value)| rules::typed_nbt(value)),
+                            },
+                        },
+                        callbacks,
+                    )
+                    .map(|result| match result {
+                        Some(crate::template::BlockResult::ReplaceWithAir) => {
+                            (Some("minecraft:air".into()), Disposition::ReplacedWithAir)
+                        }
+                        Some(crate::template::BlockResult::Transform { block, .. }) => {
+                            (Some(block.name), Disposition::Transformed)
+                        }
+                        _ => (Some(name.to_string()), Disposition::Unchanged),
+                    })
+                }
+                ObjectKind::Item => {
+                    let name = resolved.as_ref().expect("resolved item");
+                    let execution = rules::evaluate_item_for_execution(
+                        loaded,
+                        &RegistryKind::Item,
+                        name,
+                        object.numeric_id.unwrap_or_default(),
+                        object.data.unwrap_or_default(),
+                        count(object.nbt.as_ref()),
+                        object.nbt.as_ref(),
+                    );
+                    let nbt = object.nbt.as_ref().map_or_else(
+                        || rules::TypedNbt::Compound(std::collections::BTreeMap::default()),
+                        rules::typed_nbt,
+                    );
+                    rules::render_item(
+                        loaded,
+                        &execution,
+                        crate::template::ItemContext {
+                            original: crate::template::ItemOriginal {
+                                name: name.to_string(),
+                                numeric_id: object.numeric_id.unwrap_or_default(),
+                                count: i8::try_from(count(object.nbt.as_ref())).unwrap_or_default(),
+                                damage: i16::try_from(object.data.unwrap_or_default())
+                                    .unwrap_or_default(),
+                                nbt,
+                            },
+                        },
+                        callbacks,
+                    )
+                    .map(|result| match result {
+                        Some(crate::template::ItemResult::Drop) => (None, Disposition::Dropped),
+                        Some(crate::template::ItemResult::Transform { item }) => {
+                            (Some(item.name), Disposition::Transformed)
+                        }
+                        _ => (Some(name.to_string()), Disposition::Unchanged),
+                    })
+                }
+                ObjectKind::Entity => {
+                    let execution = rules::evaluate_entity_for_execution(
+                        loaded,
+                        &source_identity,
+                        object.nbt.as_ref().unwrap_or(&ValueHolder::EMPTY),
+                    );
+                    rules::render_entity(
+                        loaded,
+                        &execution,
+                        crate::template::EntityContext {
+                            original: crate::template::EntityOriginal {
+                                name: source_identity.clone(),
+                                nbt: object.nbt.as_ref().map_or_else(
+                                    || {
+                                        rules::TypedNbt::Compound(
+                                            std::collections::BTreeMap::default(),
+                                        )
+                                    },
+                                    rules::typed_nbt,
+                                ),
+                            },
+                        },
+                        callbacks,
+                    )
+                    .map(|result| match result {
+                        Some(crate::template::EntityResult::Delete) => (None, Disposition::Deleted),
+                        Some(crate::template::EntityResult::Transform { entity }) => {
+                            (Some(entity.name), Disposition::Transformed)
+                        }
+                        _ => (Some(source_identity.clone()), Disposition::Unchanged),
+                    })
+                }
+                ObjectKind::BlockEntity => {
+                    Ok((Some(source_identity.clone()), Disposition::Unchanged))
+                }
+            };
+        let (nested, identity_maps, value_maps) = session.outcomes();
+        template_diagnostics.extend(
+            nested
+                .into_iter()
+                .map(|outcome| crate::report::TemplateDiagnostic::NestedItemCall { outcome }),
+        );
+        template_diagnostics.extend(
+            identity_maps
+                .into_iter()
+                .map(|outcome| crate::report::TemplateDiagnostic::IdentityMap { outcome }),
+        );
+        match rendered {
+            Ok((identity, disposition)) => {
+                template_diagnostics.push(crate::report::TemplateDiagnostic::Render {
+                    success: true,
+                    detail: None,
+                });
+                template_diagnostics.push(crate::report::TemplateDiagnostic::TypedDecode {
+                    success: true,
+                    detail: None,
+                });
+                template_diagnostics.push(crate::report::TemplateDiagnostic::Resolution {
+                    identity: identity.clone(),
+                    success: true,
+                });
+                template_diagnostics.push(crate::report::TemplateDiagnostic::Disposition {
+                    disposition: disposition.clone(),
+                });
+                (identity, disposition, None, value_maps)
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                let decode = matches!(
+                    error,
+                    rules::Error::Template {
+                        source: crate::template::TemplateError::Decode { .. }
+                    }
+                );
+                template_diagnostics.push(crate::report::TemplateDiagnostic::Render {
+                    success: false,
+                    detail: Some(detail.clone()),
+                });
+                if decode {
+                    template_diagnostics.push(crate::report::TemplateDiagnostic::TypedDecode {
+                        success: false,
+                        detail: Some(detail.clone()),
+                    });
+                }
+                (
+                    Some(source_identity.clone()),
+                    Disposition::Unresolved,
+                    Some(detail),
+                    value_maps,
+                )
+            }
+        }
+    } else if kind.as_ref().is_none_or(|kind| {
+        resolved
+            .as_ref()
+            .is_some_and(|name| target.by_name(kind, name).is_some())
+    }) {
+        (
+            Some(source_identity.clone()),
+            Disposition::Unchanged,
+            None,
+            Vec::new(),
+        )
     } else {
-        match convert::apply_decision_with_maps(
-            &decision,
-            TransformObject {
-                identity: source_identity.clone(),
-                numeric: i64::from(object.data.unwrap_or_default()),
-                nbt: object.nbt.clone(),
-            },
-            &loaded.value_maps,
-            |name| {
-                RegistryName::parse(name)
-                    .is_ok_and(|name| target.by_name(kind.as_ref().unwrap(), &name).is_some())
-            },
-        ) {
-            Ok(applied) => (applied.disposition, None, applied.map_outcomes),
-            Err(error) => (Disposition::Unresolved, Some(error.to_string()), Vec::new()),
-        }
+        (
+            Some(source_identity.clone()),
+            Disposition::Unresolved,
+            Some("missing target registry mapping".into()),
+            Vec::new(),
+        )
     };
     ObjectRecord {
         kind: format!("{:?}", object.kind).to_lowercase(),
@@ -1043,8 +1202,9 @@ fn assess(
             nbt_path: object.location.nbt_path,
         },
         rules: selected_rules,
-        rule_trace: decision.trace,
+        candidates: decision.candidates,
         value_maps,
+        template_diagnostics,
         diagnostic,
     }
 }
@@ -1052,23 +1212,6 @@ fn assess(
 struct ValueHolder;
 impl ValueHolder {
     const EMPTY: crate::nbt::Value = crate::nbt::Value::Compound(std::collections::BTreeMap::new());
-}
-
-fn final_identity(source: &str, decision: &rules::Decision) -> Option<String> {
-    let mut result = source.to_owned();
-    for (_, action) in &decision.actions {
-        match action {
-            ObjectAction::Transform {
-                target: Some(target),
-                ..
-            }
-            | ObjectAction::Substitute { target } => result.clone_from(target),
-            ObjectAction::ReplaceWithAir => result = "minecraft:air".into(),
-            ObjectAction::Delete | ObjectAction::DropItem => return None,
-            ObjectAction::Transform { target: None, .. } | ObjectAction::DiscardNbt => {}
-        }
-    }
-    Some(result)
 }
 
 fn count(nbt: Option<&crate::nbt::Value>) -> i32 {
@@ -1159,21 +1302,14 @@ mod tests {
     use crate::region::RegionWriter;
     use crate::registry::{Provenance, RegistryEntry};
     use crate::rules::{
-        BlockMatcher, IdentityMatcher, ItemMatcher, NamedMatcher, NbtPath, NumericPredicate,
-        PathElement, Rule, RuleBody,
+        BlockMatcher, IdentityMatcher, ItemMatcher, NamedMatcher, NumericPredicate, Rule, RuleBody,
     };
     use crate::traversal::Location;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     fn empty_rules() -> LoadedRules {
-        LoadedRules {
-            source_profile: crate::rules::SourceProfile::Forge1_7_10,
-            documents: vec![],
-            ordered_rules: vec![],
-            standalone_inventories: vec![],
-            value_maps: BTreeMap::new(),
-        }
+        LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
     }
 
     fn targeted_chunk() -> Document {
@@ -1306,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn targeted_explanation_selects_owned_objects_nested_items_and_ignores_corrupt_files() {
+    fn targeted_explanation_stops_at_owned_objects_and_ignores_corrupt_files() {
         let root = tempfile::tempdir().unwrap();
         write_target_region(root.path(), &targeted_chunk());
         fs::write(
@@ -1316,28 +1452,25 @@ mod tests {
         .unwrap();
         fs::write(root.path().join("unrelated.dat"), b"corrupt unrelated nbt").unwrap();
         let catalogs = RegistryCatalog::default();
-        let mut rules = empty_rules();
-        rules.ordered_rules.push(Rule {
-            id: "nested-bag".into(),
-            priority: 0,
-            terminal: false,
-            body: RuleBody::Item {
-                matcher: ItemMatcher {
-                    identity: IdentityMatcher::Name {
-                        name: "mod:bag".into(),
+        let rules = LoadedRules::with_rules(
+            crate::rules::SourceProfile::Forge1_7_10,
+            vec![Rule {
+                id: "nested-bag".into(),
+                priority: 0,
+                body: RuleBody::Item {
+                    matcher: ItemMatcher {
+                        identity: IdentityMatcher::Name {
+                            name: "mod:bag".into(),
+                        },
+                        damage: NumericPredicate::Any,
+                        count: NumericPredicate::Any,
+                        nbt: vec![],
                     },
-                    damage: NumericPredicate::Any,
-                    count: NumericPredicate::Any,
-                    nbt: vec![],
+                    template: r#"{"disposition":"unchanged"}"#.into(),
+                    target_name: None,
                 },
-                action: ObjectAction::Transform {
-                    target: None,
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![NbtPath(vec![PathElement::Field("Nested".into())])],
-                },
-            },
-        });
+            }],
+        );
         let records = explain_at_coordinate_with_progress(
             root.path(),
             &catalogs,
@@ -1353,20 +1486,17 @@ mod tests {
                 .iter()
                 .map(|record| record.kind.as_str())
                 .collect::<Vec<_>>(),
-            ["block", "blockentity", "item", "item", "item"]
+            ["block", "blockentity", "item", "item"]
         );
         assert!(records
             .iter()
             .all(|record| record.location.file == "region/r.0.0.mca"
                 && record.location.block == Some([0, 0, 0])));
-        assert!(records
+        assert!(records.iter().all(|record| !record
+            .location
+            .nbt_path
             .iter()
-            .any(|record| record.location.nbt_path.ends_with(&[
-                "Items".into(),
-                "0".into(),
-                "Nested".into(),
-                "0".into()
-            ])));
+            .any(|part| part == "Nested")));
     }
 
     #[test]
@@ -1392,11 +1522,9 @@ mod tests {
                 provenance: Provenance::built_in("test"),
             })
             .unwrap();
-        let mut rules = empty_rules();
-        rules.ordered_rules.push(Rule {
+        let rules = LoadedRules::with_rules(crate::rules::SourceProfile::Forge1_7_10, vec![Rule {
             id: "coordinated".into(),
             priority: 0,
-            terminal: false,
             body: RuleBody::Block {
                 matcher: BlockMatcher {
                     identity: IdentityMatcher::Name {
@@ -1409,14 +1537,9 @@ mod tests {
                         nbt: vec![],
                     }),
                 },
-                action: ObjectAction::Transform {
-                    target: Some("minecraft:dirt".into()),
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![],
-                },
+                template: r#"{"disposition":"transform","block":{"name":"minecraft:dirt","metadata":0},"block_entity":null}"#.into(),
             },
-        });
+        }]);
 
         let targeted = explain_at_coordinate_with_progress(
             root.path(),
@@ -1501,7 +1624,7 @@ mod tests {
         .unwrap();
         let events = Mutex::new(Vec::new());
         let observer = |event| events.lock().unwrap().push(event);
-        stream_source_batches_with_progress(root.path(), &[], &observer, |_, _| Ok(())).unwrap();
+        stream_source_batches_with_progress(root.path(), &observer, |_, _| Ok(())).unwrap();
         assert_eq!(
             *events.lock().unwrap(),
             vec![
@@ -1519,8 +1642,7 @@ mod tests {
         fs::write(region_dir.join("r.0.0.mca"), b"truncated").unwrap();
         events.lock().unwrap().clear();
         assert!(
-            stream_source_batches_with_progress(root.path(), &[], &observer, |_, _| Ok(()))
-                .is_err()
+            stream_source_batches_with_progress(root.path(), &observer, |_, _| Ok(())).is_err()
         );
         assert!(matches!(
             events.lock().unwrap().as_slice(),
@@ -1546,7 +1668,6 @@ mod tests {
 
         let error = reduce_source_with_progress_config(
             root.path(),
-            &[],
             &NoProgress,
             crate::work::ExecutionConfig::new(2).unwrap(),
             || (),
@@ -1578,7 +1699,6 @@ mod tests {
         let worker_gate = std::sync::Arc::clone(&gate);
         reduce_source_with_progress_config(
             root.path(),
-            &[],
             &NoProgress,
             crate::work::ExecutionConfig::new(2).unwrap(),
             || (),
@@ -1616,8 +1736,8 @@ mod tests {
             source_profile: crate::rules::SourceProfile::Forge1_7_10,
             documents: vec![],
             ordered_rules: vec![],
-            standalone_inventories: vec![],
             value_maps: std::collections::BTreeMap::new(),
+            ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
         };
         let mut first = PreflightAccumulator::new(&source, &target, &rules);
         let mut second = PreflightAccumulator::new(&source, &target, &rules);
@@ -1700,8 +1820,8 @@ mod tests {
                 source_profile: crate::rules::SourceProfile::Forge1_7_10,
                 documents: vec![],
                 ordered_rules: vec![],
-                standalone_inventories: vec![],
                 value_maps: std::collections::BTreeMap::new(),
+                ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
             };
             let mut accumulator = PreflightAccumulator::new(&source, &target, &loaded);
             let results = order.iter().map(|index| {
@@ -1733,14 +1853,14 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir_all(source.path().join("AE2/compass")).unwrap();
         fs::write(source.path().join("AE2/compass/-1858.dat"), vec![0; 1024]).unwrap();
-        let (_, _, opaque, _) = stream_source_batches(source.path(), &[], |_, _| Ok(())).unwrap();
+        let (_, _, opaque, _) = stream_source_batches(source.path(), |_, _| Ok(())).unwrap();
         assert_eq!(opaque.len(), 1);
         assert_eq!(opaque[0].path, "AE2/compass/-1858.dat");
         assert!(opaque[0].diagnostic.contains("NBT root"));
 
         fs::create_dir_all(source.path().join("data")).unwrap();
         fs::write(source.path().join("data/map_7.dat"), b"not nbt").unwrap();
-        let error = stream_source_batches(source.path(), &[], |_, _| Ok(())).unwrap_err();
+        let error = stream_source_batches(source.path(), |_, _| Ok(())).unwrap_err();
         assert!(error.to_string().contains("map_7.dat"));
     }
 
@@ -1760,7 +1880,7 @@ mod tests {
             b"opaque legacy bytes",
         )
         .unwrap();
-        let (_, _, opaque, _) = stream_source_batches(source.path(), &[], |_, _| Ok(())).unwrap();
+        let (_, _, opaque, _) = stream_source_batches(source.path(), |_, _| Ok(())).unwrap();
         assert_eq!(
             opaque
                 .iter()

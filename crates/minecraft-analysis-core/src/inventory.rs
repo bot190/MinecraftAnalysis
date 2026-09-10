@@ -37,13 +37,11 @@ pub enum Error {
 }
 
 #[must_use]
-pub fn effective_paths(declared: &[NbtPath]) -> Vec<NbtPath> {
-    let mut paths = declared.to_vec();
-    paths.push(NbtPath(vec![PathElement::Field("Inventory".into())]));
-    paths.push(NbtPath(vec![PathElement::Field("EnderItems".into())]));
-    paths.sort();
-    paths.dedup();
-    paths
+fn built_in_paths() -> [NbtPath; 2] {
+    [
+        NbtPath(vec![PathElement::Field("Inventory".into())]),
+        NbtPath(vec![PathElement::Field("EnderItems".into())]),
+    ]
 }
 
 /// Resolve every canonical path without accepting a partial or mixed item list.
@@ -52,18 +50,13 @@ pub fn effective_paths(declared: &[NbtPath]) -> Vec<NbtPath> {
 ///
 /// Returns an error when path depth or the document-wide discovered-item count
 /// exceeds the supplied nested traversal limits.
-pub fn resolve(
-    document: &Document,
-    file: &str,
-    declared: &[NbtPath],
-    limits: NestedLimits,
-) -> Result<Resolution, Error> {
+pub fn resolve(document: &Document, file: &str, limits: NestedLimits) -> Result<Resolution, Error> {
     let mut result = Resolution {
         inventories: vec![],
         findings: vec![],
         item_count: 0,
     };
-    for path in effective_paths(declared) {
+    for path in built_in_paths() {
         if path.0.len() > limits.max_depth {
             return Err(Error::Depth {
                 actual: path.0.len(),
@@ -165,66 +158,54 @@ mod tests {
     }
 
     #[test]
-    fn resolves_wrapped_lists_after_invalid_built_in_and_deduplicates_paths() {
-        let declared = NbtPath(vec![
-            PathElement::Field("Inventory".into()),
-            PathElement::Field("Items".into()),
-        ]);
+    fn resolves_only_built_in_inventory_and_ender_items_paths() {
+        let list = || {
+            Value::List(List {
+                element_tag: Tag::Compound,
+                values: vec![item("mod:item")],
+            })
+        };
         let document = Document {
             root_name: String::new(),
-            root: BTreeMap::from([(
-                "Inventory".into(),
-                Value::Compound(BTreeMap::from([(
-                    "Items".into(),
-                    Value::List(List {
-                        element_tag: Tag::Compound,
-                        values: vec![item("mod:one")],
-                    }),
-                )])),
-            )]),
+            root: BTreeMap::from([
+                ("Inventory".into(), list()),
+                ("EnderItems".into(), list()),
+                ("Custom".into(), list()),
+            ]),
         };
         let result = resolve(
             &document,
-            "data\\death.dat",
-            &[declared.clone(), declared.clone()],
+            "player.dat",
             NestedLimits {
                 max_depth: 8,
                 max_objects: 4,
             },
         )
         .unwrap();
-        assert_eq!(result.inventories, [declared]);
-        assert_eq!(result.item_count, 1);
-        assert_eq!(result.findings.len(), 1);
-        assert_eq!(result.findings[0].file, "data/death.dat");
+        assert_eq!(result.inventories.len(), 2);
+        assert_eq!(result.item_count, 2);
     }
 
     #[test]
-    fn rejects_a_whole_mixed_list_and_enforces_document_limits() {
-        let path = NbtPath(vec![PathElement::Field("Custom".into())]);
-        let document = Document {
+    fn invalid_built_in_shapes_are_findings_and_object_limits_are_enforced() {
+        let invalid = Document {
             root_name: String::new(),
-            root: BTreeMap::from([(
-                "Custom".into(),
-                Value::List(List {
-                    element_tag: Tag::Compound,
-                    values: vec![item("mod:one"), Value::Int(2)],
-                }),
-            )]),
+            root: BTreeMap::from([("Inventory".into(), Value::Int(1))]),
         };
-        let result = resolve(
-            &document,
-            "x.dat",
-            &[path],
-            NestedLimits {
-                max_depth: 8,
-                max_objects: 10,
-            },
-        )
-        .unwrap();
-        assert!(result.inventories.is_empty());
-        assert_eq!(result.findings.len(), 1);
-
+        assert_eq!(
+            resolve(
+                &invalid,
+                "x.dat",
+                NestedLimits {
+                    max_depth: 8,
+                    max_objects: 4
+                }
+            )
+            .unwrap()
+            .findings
+            .len(),
+            1
+        );
         let valid = Document {
             root_name: String::new(),
             root: BTreeMap::from([(
@@ -238,8 +219,7 @@ mod tests {
         assert!(matches!(
             resolve(
                 &valid,
-                "x",
-                &[],
+                "x.dat",
                 NestedLimits {
                     max_depth: 8,
                     max_objects: 1
@@ -247,61 +227,5 @@ mod tests {
             ),
             Err(Error::Count { limit: 1 })
         ));
-        assert!(matches!(
-            resolve(
-                &valid,
-                "x",
-                &[NbtPath(vec![
-                    PathElement::Field("a".into()),
-                    PathElement::Field("b".into())
-                ])],
-                NestedLimits {
-                    max_depth: 1,
-                    max_objects: 9
-                }
-            ),
-            Err(Error::Depth { .. })
-        ));
-    }
-
-    #[test]
-    fn supports_index_components_and_quiet_absence() {
-        let path = NbtPath(vec![
-            PathElement::Field("Containers".into()),
-            PathElement::Index(0),
-            PathElement::Field("Items".into()),
-        ]);
-        let wrapper = Value::Compound(BTreeMap::from([(
-            "Items".into(),
-            Value::List(List {
-                element_tag: Tag::Compound,
-                values: vec![item("mod:item")],
-            }),
-        )]));
-        let document = Document {
-            root_name: String::new(),
-            root: BTreeMap::from([(
-                "Containers".into(),
-                Value::List(List {
-                    element_tag: Tag::Compound,
-                    values: vec![wrapper],
-                }),
-            )]),
-        };
-        let result = resolve(
-            &document,
-            "x",
-            &[
-                path.clone(),
-                NbtPath(vec![PathElement::Field("Missing".into())]),
-            ],
-            NestedLimits {
-                max_depth: 8,
-                max_objects: 8,
-            },
-        )
-        .unwrap();
-        assert_eq!(result.inventories, [path]);
-        assert!(result.findings.is_empty());
     }
 }

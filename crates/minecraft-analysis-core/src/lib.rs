@@ -21,6 +21,7 @@ pub mod rules;
 mod source_analysis;
 pub mod spool;
 pub mod staging;
+pub mod template;
 pub mod traversal;
 pub mod work;
 pub mod world;
