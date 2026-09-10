@@ -66,18 +66,15 @@ The profile owns a complete built-in vanilla block and item catalog. These are
 separate registries even where a block-item shares the same numeric value.
 Built-in assignments are authoritative: a `source_manifest` may repeat them
 identically but cannot replace them, even with `conflict: "manifest"`.
-Modpack assignments come from schema-2 manifests, for example:
+Modpack assignments come from template-rule schema 1 manifests, for example:
 
-```json
-{
-  "schema_version": 2,
-  "rule_set": "example-pack-1.2.5",
-  "source_profile": "forge-1.2.5",
-  "source_manifest": [
-    {"kind": "block", "name": "example:machine", "numeric_id": 180},
-    {"kind": "item", "name": "example:wrench", "numeric_id": 180}
-  ]
-}
+```yaml
+schema_version: 1
+rule_set: example-pack-1.2.5
+source_profile: forge-1.2.5
+source_manifest:
+  - { kind: block, name: "example:machine", numeric_id: 180 }
+  - { kind: item, name: "example:wrench", numeric_id: 180 }
 ```
 
 Every encountered mod block or item needs a manifest mapping. The shared
@@ -193,6 +190,7 @@ make newer chunk layouts safe to convert.
 Standard traversal covers terrain, entities, block entities, dimensions,
 numeric item stacks, and profile-standard player files (`players/` for 1.2.5;
 `players/` and `playerdata/` for 1.7.10). Unknown typed NBT is preserved.
-Custom mod inventories outside standard locations require explicit
-`standalone_inventories` or rule `nested_items` declarations; arbitrary
-compounds are never guessed to be item stacks.
+Custom mod inventories outside standard player locations are transformed only
+when a containing block, item, or entity template explicitly invokes
+`transform_item` or `transform_items`; arbitrary compounds are never guessed to
+be item stacks.

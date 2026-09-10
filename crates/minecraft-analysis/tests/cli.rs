@@ -19,20 +19,20 @@ fn update_manifest(rule: &std::path::Path, id_map: &std::path::Path, side: &str)
 #[test]
 fn rules_update_manifest_imports_legacy_map_deterministically() {
     let root = tempfile::tempdir().unwrap();
-    let profile = root.path().join("profile.json");
-    let rules = root.path().join("rules.json");
+    let profile = root.path().join("profile.yaml");
+    let rules = root.path().join("rules.yaml");
     let id_map = root.path().join("idmap.txt");
     fs::write(
         &profile,
-        r#"{"schema_version":2,"rule_set":"profile","source_profile":"forge-1.2.5"}"#,
+        r#"{"schema_version":1,"rule_set":"profile","source_profile":"forge-1.2.5"}"#,
     )
     .unwrap();
     fs::write(
         &rules,
         r#"{
-  "schema_version": 2,
+  "schema_version": 1,
   "rule_set": "root",
-  "imports": ["profile.json"],
+  "imports": ["profile.yaml"],
   "rules": [],
   "source_manifest": [
     {"kind":"item","name":"manual:kept","numeric_id":30001}
@@ -65,8 +65,8 @@ fn rules_update_manifest_imports_legacy_map_deterministically() {
     assert_eq!(summary["vanilla_skipped"], 1);
     assert_eq!(summary["duplicate_skipped"], 1);
 
-    let document: serde_json::Value = serde_json::from_slice(&fs::read(&rules).unwrap()).unwrap();
-    assert_eq!(document["imports"], serde_json::json!(["profile.json"]));
+    let document: serde_json::Value = serde_yaml::from_slice(&fs::read(&rules).unwrap()).unwrap();
+    assert_eq!(document["imports"], serde_json::json!(["profile.yaml"]));
     assert_eq!(document["target_manifest"][0]["name"], "target:kept");
     assert_eq!(document["source_manifest"].as_array().unwrap().len(), 3);
     assert!(document["source_manifest"]
@@ -96,11 +96,11 @@ fn rules_update_manifest_imports_legacy_map_deterministically() {
 #[test]
 fn rules_update_manifest_preserves_file_on_input_and_version_failures() {
     let root = tempfile::tempdir().unwrap();
-    let rules = root.path().join("rules.json");
+    let rules = root.path().join("rules.yaml");
     let id_map = root.path().join("idmap.txt");
     fs::write(
         &rules,
-        r#"{"schema_version":2,"rule_set":"root","source_profile":"forge-1.2.5"}"#,
+        r#"{"schema_version":1,"rule_set":"root","source_profile":"forge-1.2.5"}"#,
     )
     .unwrap();
     let original = fs::read(&rules).unwrap();
@@ -131,7 +131,7 @@ fn removed_dry_run_is_rejected_without_creating_world_output() {
             "--output",
             output.to_str().unwrap(),
             "--rules",
-            root.path().join("rules.json").to_str().unwrap(),
+            root.path().join("rules.yaml").to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -291,11 +291,11 @@ fn rules_infer_reads_world_pair_deterministically_and_atomically() {
     write_block_world(&source);
     write_block_world(&target);
     make_forge_112_level(&target);
-    let rules = root.path().join("rules.json");
+    let rules = root.path().join("rules.yaml");
     fs::write(
         &rules,
         r#"{
-  "schema_version": 3,
+  "schema_version": 1,
   "rule_set": "inference-context",
   "source_profile": "forge-1.7.10",
   "source_manifest": [{"kind":"block","name":"source:machine","numeric_id":300}],
@@ -315,13 +315,31 @@ fn rules_infer_reads_world_pair_deterministically_and_atomically() {
     );
     assert_eq!(first.stdout.last(), Some(&b'\n'));
     assert!(!first.stdout.ends_with(b"\n\n"));
-    let output: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let output: serde_json::Value = serde_yaml::from_slice(&first.stdout).unwrap();
     let entries = output.as_array().unwrap();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["object"], "block");
     assert_eq!(entries[0]["matcher"]["name"], "source:machine");
-    assert_eq!(entries[0]["action"]["target"], "target:machine");
-    assert_eq!(entries[1]["object"], "block_entity");
+    let template = entries[0]["template"].as_str().unwrap();
+    assert!(template.lines().count() > 1);
+    assert!(template.contains("target:machine"));
+
+    let inferred_path = root.path().join("inferred.yaml");
+    let indented_rules = String::from_utf8(first.stdout.clone())
+        .unwrap()
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        &inferred_path,
+        format!(
+            "schema_version: 1\nrule_set: inferred\nsource_profile: forge-1.7.10\nsource_manifest:\n  - {{ kind: block, name: source:machine, numeric_id: 300 }}\ntarget_manifest:\n  - {{ kind: block, name: target:machine, numeric_id: 300 }}\nrules:\n{indented_rules}\n"
+        ),
+    )
+    .unwrap();
+    let inferred = minecraft_analysis_core::rules::load(&inferred_path).unwrap();
+    assert_eq!(inferred.ordered_rules.len(), 1);
 
     let repeated = rules_infer(&source, &target, &rules, &[]);
     assert!(repeated.status.success());
@@ -359,10 +377,10 @@ fn rules_infer_profile_and_identity_failures_leave_stdout_empty() {
     let target = root.path().join("target");
     write_block_world(&source);
     write_block_world(&target);
-    let rules = root.path().join("rules.json");
+    let rules = root.path().join("rules.yaml");
     fs::write(
         &rules,
-        r#"{"schema_version":3,"rule_set":"context","source_profile":"forge-1.7.10","source_manifest":[{"kind":"block","name":"source:machine","numeric_id":300}]}"#,
+        r#"{"schema_version":1,"rule_set":"context","source_profile":"forge-1.7.10","source_manifest":[{"kind":"block","name":"source:machine","numeric_id":300}]}"#,
     )
     .unwrap();
 
@@ -385,11 +403,11 @@ fn nbt_dump_world_coordinate_uses_shared_context_and_is_atomic() {
     let root = tempfile::tempdir().unwrap();
     let world = root.path().join("world");
     write_block_world(&world);
-    let source_rule = root.path().join("source.json");
+    let source_rule = root.path().join("source.yaml");
     fs::write(
         &source_rule,
         r#"{
-      "schema_version":2,"rule_set":"source","source_profile":"forge-1.7.10",
+      "schema_version":1,"rule_set":"source","source_profile":"forge-1.7.10",
       "source_manifest":[{"kind":"block","name":"source:machine","numeric_id":300}]
     }"#,
     )
@@ -782,7 +800,7 @@ fn jobs_is_global_positive_and_available_on_region_commands() {
             "--output",
             "out",
             "--rules",
-            "rules.json",
+            "rules.yaml",
         ])
         .output()
         .unwrap();
@@ -979,12 +997,12 @@ fn explain_targets_overworld_and_explicit_modded_dimension() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let template = root.path().join("template");
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     coverage_world(&source, true);
     empty_profile_world(&template, true);
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"explain","source_profile":"forge-1.7.10","rules":[{"id":"explain:machine","object":"block","matcher":{"name":"mod:machine"},"template":"{\"disposition\":\"unchanged\"}"}]}"#,
     )
     .unwrap();
     fs::create_dir_all(source.join("DIM7/region")).unwrap();
@@ -1002,6 +1020,12 @@ fn explain_targets_overworld_and_explicit_modded_dimension() {
     );
     let overworld: serde_json::Value = serde_json::from_slice(&overworld.stdout).unwrap();
     assert_eq!(overworld["objects"].as_array().unwrap().len(), 2);
+    let block = &overworld["objects"].as_array().unwrap()[0];
+    assert_eq!(block["candidates"][0]["rule_id"], "explain:machine");
+    assert_eq!(
+        block["template_diagnostics"][0]["phase"],
+        "selected_template"
+    );
     assert!(overworld["objects"]
         .as_array()
         .unwrap()
@@ -1027,12 +1051,12 @@ fn explain_failures_are_actionable_for_coordinates_dimensions_and_containers() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let template = root.path().join("template");
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     coverage_world(&source, false);
     empty_profile_world(&template, true);
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
     let no_object = explain_command(&source, &template, &rules, "0,100,0", None);
@@ -1081,10 +1105,10 @@ fn rule_coverage_is_read_only_deterministic_and_uses_three_exit_classes() {
     let before_level = fs::read(world.join("level.dat")).unwrap();
     let before_region = fs::read(world.join("region/r.0.0.mca")).unwrap();
 
-    let empty_rules = root.path().join("empty.json");
+    let empty_rules = root.path().join("empty.yaml");
     fs::write(
         &empty_rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
     let first = coverage_command(&world, &empty_rules);
@@ -1129,18 +1153,18 @@ fn rule_coverage_is_read_only_deterministic_and_uses_three_exit_classes() {
         before_region
     );
 
-    let matching_rules = root.path().join("matching.json");
+    let matching_rules = root.path().join("matching.yaml");
     fs::write(
         &matching_rules,
         r#"{
           "schema_version": 1,
           "rule_set": "matching",
+          "source_profile": "forge-1.7.10",
           "rules": [{
             "id": "test:machine",
-            "terminal": true,
             "object": "block",
             "matcher": {"name": "mod:machine"},
-            "action": {"action": "transform"}
+            "template": "{\"disposition\":\"unchanged\"}"
           }]
         }"#,
     )
@@ -1193,10 +1217,10 @@ fn forge_1_2_5_profile_drives_coverage_conversion_and_unmapped_failures() {
     let before_level = fs::read(source.join("level.dat")).unwrap();
     let before_region = fs::read(source.join("region/r.0.0.mca")).unwrap();
 
-    let incomplete = root.path().join("incomplete.json");
+    let incomplete = root.path().join("incomplete.yaml");
     fs::write(
         &incomplete,
-        r#"{"schema_version":2,"rule_set":"incomplete","source_profile":"forge-1.2.5","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"incomplete","source_profile":"forge-1.2.5","rules":[]}"#,
     )
     .unwrap();
     let incomplete_coverage = coverage_command(&source, &incomplete);
@@ -1275,19 +1299,19 @@ fn forge_1_2_5_profile_drives_coverage_conversion_and_unmapped_failures() {
         before_region
     );
 
-    let rules = root.path().join("complete.json");
+    let rules = root.path().join("complete.yaml");
     fs::write(
         &rules,
         r#"{
-          "schema_version":2,
+          "schema_version":1,
           "rule_set":"pack-125",
           "source_profile":"forge-1.2.5",
           "source_manifest":[{"kind":"block","name":"mod:machine","numeric_id":300}],
           "target_manifest":[{"kind":"block","name":"mod:machine","numeric_id":500}],
           "rules":[{
-            "id":"machine","terminal":true,"object":"block",
+            "id":"machine","object":"block",
             "matcher":{"name":"mod:machine"},
-            "action":{"action":"transform"}
+            "template":"{\"disposition\":\"unchanged\"}"
           }]
         }"#,
     )
@@ -1335,10 +1359,10 @@ fn no_progress_is_a_global_option_and_preserves_machine_readable_stdout() {
     let world = root.path().join("world");
     fs::create_dir(&world).unwrap();
     coverage_world(&world, false);
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
@@ -1360,13 +1384,13 @@ fn convert_failure_emits_context_without_a_report_and_refuses_publication() {
     let source = root.path().join("source");
     let template = root.path().join("template");
     let output_world = root.path().join("output");
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     empty_profile_world(&source, false);
     empty_profile_world(&template, true);
     fs::write(source.join("region/r.0.0.mca"), b"malformed region").unwrap();
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
 
@@ -1409,6 +1433,48 @@ fn convert_failure_emits_context_without_a_report_and_refuses_publication() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("cannot convert region"));
 }
 
+#[test]
+fn template_limit_failure_is_contextual_and_leaves_output_unpublished() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let template = root.path().join("template");
+    let output = root.path().join("output");
+    coverage_world(&source, false);
+    empty_profile_world(&template, true);
+    let rules = root.path().join("rules.yaml");
+    fs::write(&rules, serde_json::json!({
+        "schema_version": 1,
+        "rule_set": "limit",
+        "source_profile": "forge-1.7.10",
+        "source_manifest": [{"kind":"block","name":"mod:machine","numeric_id":300}],
+        "target_manifest": [{"kind":"block","name":"mod:machine","numeric_id":300}],
+        "rules": [{
+            "id":"limit:machine", "object":"block", "matcher":{"name":"mod:machine"},
+            "template":"{% for value in range(200000) %} {% endfor %}{\"disposition\":\"unchanged\"}"
+        }]
+    }).to_string()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
+        .args(["convert", "--source"])
+        .arg(&source)
+        .arg("--template")
+        .arg(&template)
+        .arg("--output")
+        .arg(&output)
+        .arg("--rules")
+        .arg(&rules)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(!output.exists());
+    let diagnostic = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("limit:machine"), "{diagnostic}");
+    assert!(diagnostic.contains("region/r.0.0.mca"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("fuel") || diagnostic.contains("limit"),
+        "{diagnostic}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn interactive_stderr_shows_analysis_progress_and_honors_disable() {
@@ -1425,10 +1491,10 @@ fn interactive_stderr_shows_analysis_progress_and_honors_disable() {
         RegionWriter::new().unwrap().finish().unwrap(),
     )
     .unwrap();
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
     let executable = env!("CARGO_BIN_EXE_minecraft-analysis");
@@ -1473,12 +1539,12 @@ fn interactive_convert_reports_every_performed_phase_in_order() {
     let source = root.path().join("source");
     let template = root.path().join("template");
     let output_world = root.path().join("output");
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     empty_profile_world(&source, false);
     empty_profile_world(&template, true);
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
 
@@ -1525,12 +1591,12 @@ fn interactive_explain_reports_only_targeted_work() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let template = root.path().join("template");
-    let rules = root.path().join("empty.json");
+    let rules = root.path().join("empty.yaml");
     coverage_world(&source, false);
     empty_profile_world(&template, true);
     fs::write(
         &rules,
-        r#"{"schema_version":1,"rule_set":"empty","rules":[]}"#,
+        r#"{"schema_version":1,"rule_set":"empty","source_profile":"forge-1.7.10","rules":[]}"#,
     )
     .unwrap();
     let executable = env!("CARGO_BIN_EXE_minecraft-analysis");

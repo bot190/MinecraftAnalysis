@@ -126,8 +126,8 @@ Always work from backups. The converter requires:
 - a separate world freshly created by the exact Forge 1.12.2 modpack that will
   load the result;
 - a nonexistent output path on the same filesystem as its parent;
-- one or more JSON rule documents. Schema 2 declares `source_profile`; existing
-  schema-1 documents remain implicitly Forge 1.7.10.
+- one or more YAML rule documents. Template-rule schema 1 declares
+  `source_profile`; older action-based documents and JSON documents are rejected.
 
 Start the target modpack once, create and save a minimal world, exit cleanly,
 and use that world as `--template`. Its persisted Forge registry snapshot is the
@@ -140,7 +140,7 @@ cargo run -p minecraft-analysis -- dry-run \
   --source /worlds/source-1.7.10 \
   --template /worlds/template-1.12.2 \
   --output /worlds/converted \
-  --rules rules/modpack.json \
+  --rules rules/modpack.yaml \
   --report preflight.json
 ```
 
@@ -155,7 +155,7 @@ defaults to `overworld`):
 cargo run -p minecraft-analysis -- explain \
   --source /worlds/source-1.7.10 \
   --template /worlds/template-1.12.2 \
-  --rules rules/modpack.json \
+  --rules rules/modpack.yaml \
   --location '12,64,-3' \
   --dimension nether
 ```
@@ -176,7 +176,7 @@ blocks and items that still need transformation rules:
 ```sh
 cargo run -p minecraft-analysis -- rules coverage \
   --world /worlds/source-1.7.10 \
-  --rules rules/modpack.json \
+  --rules rules/modpack.yaml \
   --report coverage.json
 ```
 
@@ -216,7 +216,7 @@ cargo run -p minecraft-analysis -- convert \
   --source /worlds/source-1.7.10 \
   --template /worlds/template-1.12.2 \
   --output /worlds/converted \
-  --rules rules/modpack.json
+  --rules rules/modpack.yaml
 ```
 
 ### Region concurrency
@@ -237,7 +237,7 @@ cargo run -p minecraft-analysis -- --jobs 1 dry-run \
   --source /worlds/source \
   --template /worlds/forge-1.12.2-template \
   --output /worlds/converted \
-  --rules rules.json
+  --rules rules.yaml
 ```
 
 Each active conversion worker can retain complete source and output region
@@ -250,20 +250,32 @@ transformed NBT or region file is checked against the target catalogs while it
 is transformed, then encoded, flushed, and committed through a temporary
 sibling. Publication occurs only after every work unit succeeds, by one
 same-filesystem rename. Source and template files are opened read-only and
-remain unchanged. Conversion emits no report document; use `dry-run` for a
-complete compatibility report, `rules coverage` for rule completeness, and
+remain unchanged. Conversion emits no report document; use `rules coverage` for rule completeness, and
 `explain` for location-specific rule traces.
 
 ## Rule authoring
 
-See [`examples/rules/example.json`](examples/rules/example.json). Documents carry
-`schema_version`, a stable `rule_set`, a schema-2 `source_profile`, optional imports/manifests, and uniquely
-identified rules. Rules can target blocks, items, entities, and block entities;
-match exact/masked/ranged metadata and typed NBT; patch values without passing
-through lossy JSON representations; and declare mod-specific nested item paths.
+See [`examples/rules/example.yaml`](examples/rules/example.yaml). Documents carry
+template-rule `schema_version` 1, a stable `rule_set`, a `source_profile`, optional
+imports/manifests and value maps, and uniquely identified rules. Indexed identity
+candidates are ordered by priority and stable graph order; the first matching
+block, item, or entity rule renders its inline MiniJinja template. Blocks and
+their colocated block entities use one coordinated result, with output entity
+coordinates normalized to the owning block.
 
-Loss is opt-in. Deletion, air replacement, dropped items, NBT discard, clamping,
-and unrelated substitution require an explicit selected rule. Missing mappings
+Templates receive a complete immutable `original` value and return typed JSON
+result envelopes, preserving every NBT tag. `value_map` performs typed table
+lookups, `transform_item` and `transform_items` recursively convert arbitrary
+template-owned inventory layouts, and `map_item_id` uses an item rule's
+`target_name` projection without fabricating a stack. Rendering, recursion,
+object count, and output are bounded and deterministic; templates cannot load
+files or access process, network, time, randomness, or environment state.
+Rule documents must use a `.yaml` or `.yml` extension; JSON rule documents are
+not supported. Write templates as YAML literal blocks (`template: |`) so their
+source remains multiline and requires no JSON string escaping.
+
+Loss is opt-in through a kind-specific template disposition: entity deletion,
+block replacement with air, or item drop. Missing mappings
 fail the active conversion work unit by default. Registry contradictions require an explicit world or
 manifest selection, except that authoritative Forge 1.2.5 vanilla assignments
 cannot be replaced. Forge 1.2.5 manifests must separately declare every modpack
@@ -273,8 +285,8 @@ block and item numeric assignment.
 
 Analysis reports are JSON containing the resolved source profile, input audit metadata, rule-set IDs,
 registry mappings, disposition counts, object locations, selected rules and full
-decision traces, warnings, file dispositions, and outcome. `unresolved` objects
-in a dry run predict conversion failure. Locations retain file, dimension, chunk, block coordinate,
+candidate/matcher and template diagnostics, warnings, file dispositions, and outcome.
+Locations retain file, dimension, chunk, block coordinate,
 and NBT path where applicable.
 
 Parallel analysis contributions are appended as workers complete. Report schemas,

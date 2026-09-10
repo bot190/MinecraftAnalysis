@@ -7,11 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::nbt::{self, Value};
 use crate::preflight::SourceInventory;
 use crate::registry::{RegistryCatalog, RegistryKind, RegistryName};
-use crate::rules::{self, LoadedRules, ObjectAction, PathElement, RuleTrace};
+use crate::rules::{self, CandidateOutcome, LoadedRules};
 use crate::traversal::{LocatedObject, ObjectKind};
 
 pub const COVERAGE_REPORT_SCHEMA: u32 = 1;
-pub const NESTED_DISCOVERY_WARNING: &str = "coverage includes standard item locations and rule-declared nested paths; undeclared mod-specific item paths cannot be proven covered";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -83,7 +82,7 @@ pub struct UncoveredSignature {
     pub occurrence_count: u64,
     pub locations: Vec<CoverageLocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rejection_trace: Vec<RuleTrace>,
+    pub rejection_trace: Vec<CandidateOutcome>,
     pub diagnostic: String,
 }
 
@@ -250,7 +249,6 @@ fn analyze_source_observed(
     };
     let (_, _, _, findings) = crate::source_analysis::reduce_source_with_progress_config(
         source,
-        &loaded.standalone_inventories,
         progress,
         execution,
         || CoverageAccumulator::new(source_catalog, vanilla_catalog, loaded),
@@ -271,7 +269,6 @@ struct CoverageAccumulator<'a> {
     output_threshold: crate::spool::Threshold,
     observed: u64,
     covered: u64,
-    nested_objects: usize,
 }
 
 impl<'a> CoverageAccumulator<'a> {
@@ -291,16 +288,11 @@ impl<'a> CoverageAccumulator<'a> {
             output_threshold: crate::spool::Threshold::new(10_000, 8 * 1024 * 1024),
             observed: 0,
             covered: 0,
-            nested_objects: 0,
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn observe_batch(&mut self, objects: Vec<LocatedObject>) -> Result<()> {
-        let (objects, added) = expand_nested_items(objects, self.source_catalog, self.loaded)?;
-        self.nested_objects = self.nested_objects.saturating_add(added);
-        if self.nested_objects > MAX_NESTED_OBJECTS {
-            return Err(Error::NestedLimit);
-        }
         let block_entities = associated_block_entities(&objects)?;
         for object in &objects {
             let Some(kind) = registry_kind(object.kind) else {
@@ -319,7 +311,7 @@ impl<'a> CoverageAccumulator<'a> {
             let vanilla = self.vanilla_catalog.by_name(&kind, name);
             matches!((source, vanilla), (Some(source), Some(vanilla)) if source.numeric_id == vanilla.numeric_id && object.numeric_id.is_none_or(|id| id == vanilla.numeric_id))
         });
-            if built_in || !decision.actions.is_empty() {
+            if built_in || decision.selected_rule.is_some() {
                 self.covered += 1;
                 continue;
             }
@@ -340,7 +332,7 @@ impl<'a> CoverageAccumulator<'a> {
                 block_entity: associated,
             };
             let relevant = decision
-                .trace
+                .candidates
                 .into_iter()
                 .filter(|trace| trace.matched || trace.identity_matched)
                 .collect::<Vec<_>>();
@@ -440,7 +432,7 @@ impl<'a> CoverageAccumulator<'a> {
                 uncovered_occurrences,
                 uncovered_signatures,
             },
-            warnings: vec![NESTED_DISCOVERY_WARNING.into()],
+            warnings: Vec::new(),
             uncovered,
             validation_findings: findings,
         })
@@ -472,7 +464,7 @@ const LOCATION_SAMPLE_LIMIT: usize = 5;
 struct CoverageGroup {
     occurrence_count: u64,
     locations: Vec<CoverageLocation>,
-    rejection_trace: Vec<RuleTrace>,
+    rejection_trace: Vec<CandidateOutcome>,
     diagnostic: String,
 }
 
@@ -488,7 +480,7 @@ fn merge_coverage_group(
     signature: Signature,
     occurrence_count: u64,
     locations: Vec<CoverageLocation>,
-    rejection_trace: Vec<RuleTrace>,
+    rejection_trace: Vec<CandidateOutcome>,
     diagnostic: String,
 ) -> Result<()> {
     use std::collections::btree_map::Entry;
@@ -521,7 +513,7 @@ struct CoverageRunRecord {
     signature: Signature,
     occurrence_count: u64,
     locations: Vec<CoverageLocation>,
-    rejection_trace: Vec<RuleTrace>,
+    rejection_trace: Vec<CandidateOutcome>,
     diagnostic: String,
 }
 
@@ -603,131 +595,6 @@ fn write_coverage_group(
         diagnostic,
     })?;
     Ok(occurrence_count)
-}
-
-const MAX_NESTED_DEPTH: usize = 16;
-const MAX_NESTED_OBJECTS: usize = 100_000;
-
-pub(crate) fn expand_nested_items(
-    mut objects: Vec<LocatedObject>,
-    source_catalog: &RegistryCatalog,
-    loaded: &LoadedRules,
-) -> Result<(Vec<LocatedObject>, usize)> {
-    let mut added = Vec::new();
-    for root in objects
-        .iter()
-        .filter(|object| object.kind == ObjectKind::Item)
-    {
-        discover_nested(root, source_catalog, loaded, 0, &mut Vec::new(), &mut added)?;
-    }
-    if added.len() > MAX_NESTED_OBJECTS {
-        return Err(Error::NestedLimit);
-    }
-    let added_count = added.len();
-    objects.extend(added);
-    objects.sort_by(|a, b| {
-        a.location
-            .cmp(&b.location)
-            .then_with(|| a.kind.cmp(&b.kind))
-    });
-    Ok((objects, added_count))
-}
-
-fn discover_nested(
-    object: &LocatedObject,
-    source_catalog: &RegistryCatalog,
-    loaded: &LoadedRules,
-    depth: usize,
-    chain: &mut Vec<String>,
-    added: &mut Vec<LocatedObject>,
-) -> Result<()> {
-    if depth >= MAX_NESTED_DEPTH || added.len() >= MAX_NESTED_OBJECTS {
-        return Err(Error::NestedLimit);
-    }
-    let kind = RegistryKind::Item;
-    let name = resolve(object, source_catalog, &kind);
-    let decision = decide(object, name.as_ref(), &kind, loaded, None);
-    for (rule_id, action) in &decision.actions {
-        let ObjectAction::Transform { nested_items, .. } = action else {
-            continue;
-        };
-        if nested_items.is_empty() {
-            continue;
-        }
-        if chain.contains(rule_id) {
-            return Err(Error::NestedCycle(rule_id.clone()));
-        }
-        chain.push(rule_id.clone());
-        for path in nested_items {
-            let Some(root) = object.nbt.as_ref() else {
-                continue;
-            };
-            let Some(value) = value_at_path(root, &path.0) else {
-                continue;
-            };
-            let candidates: Vec<(usize, &Value)> = match value {
-                Value::List(list) => list.values.iter().enumerate().collect(),
-                Value::Compound(_) => vec![(0, value)],
-                _ => Vec::new(),
-            };
-            for (index, candidate) in candidates {
-                let Value::Compound(compound) = candidate else {
-                    continue;
-                };
-                let mut location = object.location.clone();
-                location.nbt_path.extend(path.0.iter().map(path_label));
-                if matches!(value, Value::List(_)) {
-                    location.nbt_path.push(index.to_string());
-                }
-                let nested = LocatedObject {
-                    kind: ObjectKind::Item,
-                    identity: string_field(compound, "id"),
-                    numeric_id: numeric_field(compound, "id"),
-                    data: numeric_field(compound, "Damage"),
-                    nbt: Some(candidate.clone()),
-                    location,
-                };
-                added.push(nested.clone());
-                discover_nested(&nested, source_catalog, loaded, depth + 1, chain, added)?;
-            }
-        }
-        chain.pop();
-    }
-    Ok(())
-}
-
-fn value_at_path<'a>(mut value: &'a Value, path: &[PathElement]) -> Option<&'a Value> {
-    for element in path {
-        value = match (value, element) {
-            (Value::Compound(map), PathElement::Field(field)) => map.get(field)?,
-            (Value::List(list), PathElement::Index(index)) => list.values.get(*index)?,
-            _ => return None,
-        };
-    }
-    Some(value)
-}
-
-fn path_label(element: &PathElement) -> String {
-    match element {
-        PathElement::Field(field) => field.clone(),
-        PathElement::Index(index) => index.to_string(),
-    }
-}
-
-fn string_field(compound: &BTreeMap<String, Value>, field: &str) -> Option<String> {
-    match compound.get(field) {
-        Some(Value::String(value)) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn numeric_field(compound: &BTreeMap<String, Value>, field: &str) -> Option<i32> {
-    match compound.get(field) {
-        Some(Value::Byte(value)) => Some(i32::from(*value)),
-        Some(Value::Short(value)) => Some(i32::from(*value)),
-        Some(Value::Int(value)) => Some(*value),
-        _ => None,
-    }
 }
 
 fn associated_block_entities(
@@ -817,8 +684,8 @@ fn decide(
 ) -> rules::Decision {
     let Some(name) = name else {
         return rules::Decision {
-            actions: Vec::new(),
-            trace: Vec::new(),
+            selected_rule: None,
+            candidates: Vec::new(),
         };
     };
     match object.kind {
@@ -887,7 +754,7 @@ mod tests {
     use crate::registry::{Provenance, RegistryEntry, VanillaVersion};
     use crate::rules::{
         BlockMatcher, IdentityMatcher, ItemMatcher, NamedMatcher, NbtPath, NbtPredicate,
-        NumericPredicate, ObjectAction, PathElement, Rule, RuleBody, TypedNbt,
+        NumericPredicate, PathElement, Rule, RuleBody, TypedNbt,
     };
     use crate::traversal::Location;
     use crate::world::DimensionId;
@@ -949,13 +816,7 @@ mod tests {
     }
 
     fn loaded(rules: Vec<Rule>) -> LoadedRules {
-        LoadedRules {
-            source_profile: crate::rules::SourceProfile::Forge1_7_10,
-            documents: vec![],
-            ordered_rules: rules,
-            standalone_inventories: vec![],
-            value_maps: BTreeMap::new(),
-        }
+        LoadedRules::with_rules(crate::rules::SourceProfile::Forge1_7_10, rules)
     }
 
     #[test]
@@ -1085,7 +946,6 @@ mod tests {
         let rule = Rule {
             id: "test:machine".into(),
             priority: 0,
-            terminal: true,
             body: RuleBody::Block {
                 matcher: BlockMatcher {
                     identity: IdentityMatcher::Name {
@@ -1095,12 +955,7 @@ mod tests {
                     nbt: vec![],
                     block_entity: None,
                 },
-                action: ObjectAction::Transform {
-                    target: None,
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![],
-                },
+                template: r#"{"disposition":"unchanged"}"#.into(),
             },
         };
         let complete = analyze(
@@ -1193,7 +1048,6 @@ mod tests {
         let rule = Rule {
             id: "test:coordinate-aware".into(),
             priority: 0,
-            terminal: true,
             body: RuleBody::Block {
                 matcher: BlockMatcher {
                     identity: IdentityMatcher::Name {
@@ -1210,12 +1064,7 @@ mod tests {
                         }],
                     }),
                 },
-                action: ObjectAction::Transform {
-                    target: None,
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![],
-                },
+                template: r#"{"disposition":"unchanged"}"#.into(),
             },
         };
         let report = analyze(
@@ -1272,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_nested_items_are_inventoried_with_extended_paths() {
+    fn covered_containing_items_do_not_expand_embedded_inventory_coverage() {
         let (mut source, vanilla) = catalogs();
         for (name, id) in [("mod:backpack", 500), ("mod:hidden", 501)] {
             source
@@ -1305,7 +1154,6 @@ mod tests {
         let traversal = Rule {
             id: "test:backpack".into(),
             priority: 0,
-            terminal: true,
             body: RuleBody::Item {
                 matcher: ItemMatcher {
                     identity: IdentityMatcher::Name {
@@ -1315,15 +1163,8 @@ mod tests {
                     count: NumericPredicate::Any,
                     nbt: vec![],
                 },
-                action: ObjectAction::Transform {
-                    target: None,
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![NbtPath(vec![
-                        PathElement::Field("tag".into()),
-                        PathElement::Field("CustomSlots".into()),
-                    ])],
-                },
+                template: r#"{"disposition":"unchanged"}"#.into(),
+                target_name: None,
             },
         };
         let report = analyze(
@@ -1334,14 +1175,8 @@ mod tests {
         )
         .unwrap();
         let uncovered = report.uncovered_records().unwrap();
-        assert_eq!(uncovered.len(), 1);
-        assert_eq!(uncovered[0].source_identity, "mod:hidden");
-        assert_eq!(uncovered[0].locations[0].block, Some([7, 8, 9]));
-        assert!(uncovered[0].locations[0].nbt_path.ends_with(&[
-            "tag".into(),
-            "CustomSlots".into(),
-            "0".into()
-        ]));
+        assert!(uncovered.is_empty());
+        assert!(report.complete);
     }
 
     #[test]

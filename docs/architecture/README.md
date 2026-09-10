@@ -14,7 +14,7 @@ historical tools and are not part of this architecture.
 ## The design in one picture
 
 ```text
- source world (read-only)       template world (read-only)       JSON rules
+ source world (read-only)       template world (read-only)       YAML rules
           |                              |                           |
           +---------- path and profile validation -----------------+
           |                              |                           |
@@ -66,14 +66,15 @@ domain objects used by the core library. All three commands call the same
 4. `rules` loads versioned rule documents and applies any explicit manifest
    selections to the catalogs.
 5. Analysis-only commands inventory and assess supported objects. `convert`
-   instead initializes a report that receives bounded work-unit contributions.
+   performs trace-free template conversion in bounded work units.
 
-`dry-run` stops after complete analysis. `explain` instead derives a region and
+`explain` derives a region and
 local chunk directly from a world-global `x,y,z` coordinate and dimension. It
 uses Euclidean division (`x,z / 16` for chunks and chunk coordinates `/ 32` for
 regions), including at negative boundaries, and reads only the selected chunk.
-The selected terrain block and block entity are assessed together, followed by
-direct and recursively nested inventory items owned by that block entity. This
+The selected terrain block and block entity are assessed together. Only embedded
+items explicitly passed by the selected template to `transform_item` or
+`transform_items` receive nested explanation records. This
 keeps targeted explanation independent of total world size and isolates it from
 corrupt unrelated regions and standalone NBT documents.
 
@@ -84,21 +85,17 @@ player data, standalone NBT, and auxiliary files. `region` and `nbt` decode the
 supported storage formats, while `traversal` turns embedded blocks, items,
 entities, and block entities into location-aware observations.
 
-Standalone inventory discovery always checks `Inventory` and `EnderItems`.
-Rule documents may additionally declare root-relative typed NBT paths with
-`standalone_inventories`, for example `[["Inventory", "Items"]]`. Strings select
-compound fields and non-negative integers select list indices. Declarations
-from imports are sorted and deduplicated. Missing paths are ignored; a present
-value must be a complete homogeneous list of compounds. An incompatible value
-is preserved and emitted as a non-fatal `invalid_inventory_shape` validation
-finding. Malformed NBT and resource-limit exhaustion remain fatal.
+Standalone player inventory discovery checks only the built-in `Inventory` and
+`EnderItems` paths. Custom standalone declarations are intentionally unsupported;
+templates own arbitrary embedded layouts. An incompatible built-in value is
+preserved and emitted as a non-fatal `invalid_inventory_shape` validation finding.
+Malformed NBT and resource-limit exhaustion remain fatal.
 
-Rule schema 3 also permits document-scoped `value_maps`: finite tables of
-explicitly typed NBT `from` and `to` values. A `map_value` patch reads a source
-path, resolves it through a named map, writes the declared destination type,
-and may then remove the distinct source path. Maps may opt into exact
+Template-rule schema 1 permits document-scoped `value_maps`: finite tables of
+explicitly typed NBT `from` and `to` values. The `value_map` template function
+resolves a typed input and returns the declared destination type. Maps may opt into exact
 cross-tag numeric equality; duplicate or ambiguous entries and unknown map
-references are rejected while loading the complete import graph.
+references are reported with rule and template context.
 
 Each observation is resolved in the source catalog, evaluated against the
 ordered rules, and checked against the target catalog. An object is marked
@@ -187,5 +184,5 @@ never silently removed or reused, which makes interrupted runs inspectable.
 - [Profiles and registry catalogs](profiles.md) explains the endpoint model in
   detail.
 - The root [README](../../README.md) is the operator-facing guide.
-- [`examples/rules/example.json`](../../examples/rules/example.json) is the
+- [`examples/rules/example.yaml`](../../examples/rules/example.yaml) is the
   concrete rule-format example.

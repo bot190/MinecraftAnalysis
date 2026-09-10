@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::nbt::{Document, Value};
 use crate::region::{self, BlockStorage};
-use crate::rules::{self, Decision, NbtPath, NestedLimits, PathElement};
+use crate::rules::{self, NbtPath, NestedLimits, PathElement};
 use crate::world::DimensionId;
 
 /// Standard locations owned by a selected source profile. Forge 1.2.5 and
@@ -265,10 +265,9 @@ pub fn scan_chunk(
 ///
 /// Returns an error when a recognized inventory field is not a compound list.
 pub fn scan_standalone(document: &Document, file: &str) -> Result<Vec<LocatedObject>> {
-    Ok(scan_standalone_configured(
+    Ok(scan_standalone_bounded(
         document,
         file,
-        &[],
         NestedLimits {
             max_depth: 32,
             max_objects: 100_000,
@@ -283,14 +282,13 @@ pub fn scan_standalone(document: &Document, file: &str) -> Result<Vec<LocatedObj
 ///
 /// Returns an error if discovery exceeds its resource limits or a resolved item
 /// cannot be traversed under the accepted compound-list contract.
-pub fn scan_standalone_configured(
+pub fn scan_standalone_bounded(
     document: &Document,
     file: &str,
-    declared: &[rules::NbtPath],
     limits: NestedLimits,
 ) -> Result<(Vec<LocatedObject>, Vec<crate::inventory::ValidationFinding>)> {
     let mut found = Vec::new();
-    let resolution = crate::inventory::resolve(document, file, declared, limits)?;
+    let resolution = crate::inventory::resolve(document, file, limits)?;
     for path in &resolution.inventories {
         let Some(Value::List(list)) = crate::inventory::value_at_root(&document.root, path) else {
             continue;
@@ -319,28 +317,6 @@ pub fn scan_standalone_configured(
     }
     found.sort_by(|a, b| a.location.cmp(&b.location));
     Ok((found, resolution.findings))
-}
-
-/// Feed rule-declared mod inventory items through the standard item pipeline.
-///
-/// No compound is interpreted as an item merely because it contains an `id`;
-/// only paths selected by the supplied decision are visited.
-///
-/// # Errors
-///
-/// Returns rule traversal errors for invalid declared paths or safety limits.
-pub fn process_mod_inventory(
-    root: &mut Value,
-    decision: &Decision,
-    limits: NestedLimits,
-    decide_item: impl FnMut(&mut Value) -> Decision,
-) -> Result<usize> {
-    Ok(rules::process_declared_nested_items(
-        root,
-        decision,
-        limits,
-        decide_item,
-    )?)
 }
 
 fn scan_sections(
@@ -929,51 +905,5 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert!(!found.iter().any(|item| item.numeric_id == Some(3)));
         assert!(found.iter().all(|item| item.location.block.is_none()));
-    }
-
-    #[test]
-    fn mod_inventory_uses_declared_path_and_standard_decision_callback() {
-        let mut root = compound([
-            (
-                "CustomSlots",
-                list(vec![compound([("id", Value::Short(7))])]),
-            ),
-            ("Unrelated", compound([("id", Value::Short(8))])),
-        ]);
-        let decision = Decision {
-            actions: vec![(
-                "mod-inventory".into(),
-                crate::rules::ObjectAction::Transform {
-                    target: None,
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![crate::rules::NbtPath(vec![
-                        crate::rules::PathElement::Field("CustomSlots".into()),
-                    ])],
-                },
-            )],
-            trace: vec![],
-        };
-        let mut ids = Vec::new();
-        let count = process_mod_inventory(
-            &mut root,
-            &decision,
-            NestedLimits {
-                max_depth: 4,
-                max_objects: 4,
-            },
-            |item| {
-                if let Value::Compound(item) = item {
-                    ids.push(numeric_field(item, "id").unwrap());
-                }
-                Decision {
-                    actions: vec![],
-                    trace: vec![],
-                }
-            },
-        )
-        .unwrap();
-        assert_eq!(count, 1);
-        assert_eq!(ids, [7]);
     }
 }

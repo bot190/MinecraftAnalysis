@@ -58,12 +58,12 @@ The system SHALL represent the target observation's complete block entity as los
 - **WHEN** a source block entity exists without a valid string `id`
 - **THEN** the command reports that its associated matcher cannot be formed, exits nonzero, and leaves standard output empty
 
-### Requirement: Emit a deterministic rule array
-On success, the system SHALL emit a deterministic pretty-printed JSON array containing exactly one schema-compatible coordinated block template rule and exactly one trailing newline. The rule SHALL be valid in the supplied rule context, SHALL use a user-supplied `--rule-id <id>` when provided, and otherwise SHALL derive a stable rule identifier from the observed registry identities.
+### Requirement: Emit a deterministic rule sequence
+On success, the system SHALL emit a deterministic YAML sequence containing exactly one schema-compatible coordinated block template rule and exactly one trailing newline. The inferred template SHALL be emitted as a literal block scalar. The rule SHALL be valid in the supplied rule context, SHALL use a user-supplied `--rule-id <id>` when provided, and otherwise SHALL derive a stable rule identifier from the observed registry identities.
 
 #### Scenario: Emit a rule snippet
 - **WHEN** inference succeeds
-- **THEN** standard output contains a JSON array with one block matcher and transformation template, without document-level schema, profile, manifest, or import fields
+- **THEN** standard output contains a YAML sequence with one block matcher and transformation template, without document-level schema, profile, manifest, or import fields
 
 #### Scenario: Repeat inference
 - **WHEN** the same world contents, coordinates, dimensions, and options are supplied more than once

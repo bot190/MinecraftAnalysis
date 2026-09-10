@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::preflight::PreflightResult;
-use crate::rules::RuleTrace;
+use crate::rules::CandidateOutcome;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,11 +58,43 @@ pub struct ObjectRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rule_trace: Vec<RuleTrace>,
+    pub candidates: Vec<CandidateOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub value_maps: Vec<crate::convert::AppliedMapOutcome>,
+    pub value_maps: Vec<crate::template::ValueMapCallOutcome>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub template_diagnostics: Vec<TemplateDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum TemplateDiagnostic {
+    SelectedTemplate {
+        rule_id: String,
+        template: String,
+    },
+    Render {
+        success: bool,
+        detail: Option<String>,
+    },
+    TypedDecode {
+        success: bool,
+        detail: Option<String>,
+    },
+    NestedItemCall {
+        outcome: crate::rules::NestedItemCallOutcome,
+    },
+    IdentityMap {
+        outcome: crate::rules::IdentityMapOutcome,
+    },
+    Resolution {
+        identity: Option<String>,
+        success: bool,
+    },
+    Disposition {
+        disposition: Disposition,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -204,8 +236,9 @@ mod tests {
                 nbt_path: vec![],
             },
             rules: vec![],
-            rule_trace: vec![],
+            candidates: vec![],
             value_maps: vec![],
+            template_diagnostics: vec![],
             diagnostic: Some("missing target mapping".into()),
         };
         let mut report = MigrationReport::default();
@@ -234,8 +267,9 @@ mod tests {
                 nbt_path: vec![],
             },
             rules: vec![],
-            rule_trace: vec![],
+            candidates: vec![],
             value_maps: vec![],
+            template_diagnostics: vec![],
             diagnostic: Some("missing target mapping".into()),
         };
         let build = |files: &[&str]| {
@@ -314,8 +348,9 @@ mod tests {
                 nbt_path: vec!["Inventory".into(), "0".into()],
             },
             rules: vec!["rule".into()],
-            rule_trace: vec![],
+            candidates: vec![],
             value_maps: vec![],
+            template_diagnostics: vec![],
             diagnostic: None,
         };
         let mut memory = MigrationReport::default();

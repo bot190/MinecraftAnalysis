@@ -1,0 +1,86 @@
+schema_version: 1
+rule_set: examplemod-1.7.10-to-1.12.2
+source_profile: forge-1.7.10
+imports: []
+value_maps:
+  - id: buildcraft:legacy-orientation
+    coerce_numeric: true
+    entries:
+      - from: { type: int, value: 0 }
+        to: { type: string, value: DOWN }
+      - from: { type: int, value: 1 }
+        to: { type: string, value: UP }
+      - from: { type: int, value: 2 }
+        to: { type: string, value: NORTH }
+      - from: { type: int, value: 3 }
+        to: { type: string, value: SOUTH }
+rules:
+  - id: examplemod:machine
+    priority: 100
+    object: block
+    matcher:
+      name: examplemod:old_machine
+      metadata: { mode: masked, mask: 3, value: 2 }
+      block_entity: { name: examplemod:old_machine }
+    template: |
+      {
+        "disposition": "transform",
+        "block": { "name": "examplemod:machine", "metadata": 0 },
+        "block_entity": {
+          "type": "compound",
+          "value": {
+            "id": { "type": "string", "value": "examplemod:machine" },
+            "Items": {
+              "type": "list",
+              "value": {
+                "element_type": "compound",
+                "values": {{ transform_items(original.block_entity.value.Items.value.values)|tojson }}
+              }
+            },
+            "orientation": {{ value_map("buildcraft:legacy-orientation", original.block_entity.value.orientation)|tojson }}
+          }
+        }
+      }
+  - id: examplemod:item
+    priority: 100
+    object: item
+    matcher: { name: examplemod:old_part }
+    target_name: examplemod:part
+    template: |
+      {
+        "disposition": "transform",
+        "item": {
+          "name": "examplemod:part",
+          "count": {{ original.count }},
+          "damage": {{ original.damage }},
+          "nbt": {{ original.nbt|tojson }}
+        }
+      }
+  - id: examplemod:carrier
+    object: entity
+    matcher: { name: examplemod:carrier }
+    template: |
+      {
+        "disposition": "transform",
+        "entity": {
+          "name": "examplemod:carrier",
+          "nbt": {
+            "type": "compound",
+            "value": {
+              "Inventory": {
+                "type": "list",
+                "value": {
+                  "element_type": "compound",
+                  "values": {{ transform_items(original.nbt.value.Inventory.value.values)|tojson }}
+                }
+              },
+              "ReferencedItem": {
+                "type": "string",
+                "value": {{ map_item_id(500)|tojson }}
+              }
+            }
+          }
+        }
+      }
+source_manifest: []
+target_manifest: []
