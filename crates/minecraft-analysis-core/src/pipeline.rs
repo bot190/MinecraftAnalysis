@@ -399,13 +399,7 @@ mod tests {
     }
 
     fn rules() -> LoadedRules {
-        LoadedRules {
-            source_profile: crate::rules::SourceProfile::Forge1_7_10,
-            documents: vec![],
-            ordered_rules: vec![],
-            standalone_inventories: vec![],
-            value_maps: BTreeMap::new(),
-        }
+        LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
     }
 
     fn limits() -> NestedLimits {

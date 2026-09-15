@@ -406,7 +406,12 @@ fn run_inference(inputs: &InferInputs) -> miette::Result<()> {
         &loaded,
     )
     .map_err(|error| miette!(error.to_string()))?;
-    let mut output = serde_json::to_vec_pretty(&inferred).into_diagnostic()?;
+    let mut output = serde_yaml::to_string(&inferred)
+        .into_diagnostic()?
+        .into_bytes();
+    while output.last() == Some(&b'\n') {
+        output.pop();
+    }
     output.push(b'\n');
     let stdout = std::io::stdout();
     let mut writer = BufWriter::new(stdout.lock());
@@ -898,9 +903,9 @@ mod tests {
             "--location",
             "0,0,0",
             "--rules",
-            "first.json",
+            "first.yaml",
             "--rules",
-            "second.json",
+            "second.yaml",
         ])
         .unwrap();
         let Command::Nbt {
@@ -911,7 +916,7 @@ mod tests {
         };
         assert_eq!(
             rules,
-            [PathBuf::from("first.json"), PathBuf::from("second.json")]
+            [PathBuf::from("first.yaml"), PathBuf::from("second.yaml")]
         );
     }
 
@@ -968,7 +973,7 @@ mod tests {
             "rules",
             "update-manifest",
             "--rules",
-            "rules.json",
+            "rules.yaml",
             "--id-map",
             "idmap.txt",
             "--manifest",
@@ -981,7 +986,7 @@ mod tests {
         else {
             panic!("expected rules update-manifest")
         };
-        assert_eq!(inputs.rules, PathBuf::from("rules.json"));
+        assert_eq!(inputs.rules, PathBuf::from("rules.yaml"));
         assert_eq!(inputs.id_map, PathBuf::from("idmap.txt"));
         assert_eq!(inputs.manifest, ManifestSelection::Source);
 
@@ -991,7 +996,7 @@ mod tests {
                 "rules",
                 "update-manifest",
                 "--rules",
-                "rules.json",
+                "rules.yaml",
                 "--id-map",
                 "idmap.txt",
             ];
@@ -1008,7 +1013,7 @@ mod tests {
                 "rules",
                 "infer",
                 "--rules",
-                "r.json",
+                "r.yaml",
                 "--source-world",
                 "source",
                 "--target-world",
@@ -1031,7 +1036,7 @@ mod tests {
             "rules",
             "infer",
             "--rules",
-            "r.json",
+            "r.yaml",
             "--source-world",
             "source",
             "--target-world",
@@ -1058,7 +1063,7 @@ mod tests {
                 "rules",
                 "infer",
                 "--rules",
-                "r.json",
+                "r.yaml",
                 "--source-world",
                 "source",
                 "--target-world",
@@ -1074,7 +1079,7 @@ mod tests {
             "rules",
             "infer",
             "--rules",
-            "r.json",
+            "r.yaml",
             "--source-world",
             "source",
             "--target-world",

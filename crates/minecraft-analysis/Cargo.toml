@@ -13,6 +13,7 @@ miette.workspace = true
 minecraft-analysis-core = { path = "../minecraft-analysis-core" }
 ratatui.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

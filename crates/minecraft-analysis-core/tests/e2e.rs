@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use minecraft_analysis_core::convert::{self, TransformObject};
 use minecraft_analysis_core::nbt::{self, Compression, Document, List, Tag, Value};
 use minecraft_analysis_core::pipeline;
 use minecraft_analysis_core::region::{
@@ -11,10 +10,7 @@ use minecraft_analysis_core::region::{
 use minecraft_analysis_core::registry::{
     Provenance, RegistryCatalog, RegistryEntry, RegistryKind, RegistryName,
 };
-use minecraft_analysis_core::rules::{
-    IdentityMatcher, ItemMatcher, LoadedRules, NbtPath, NumericPredicate, ObjectAction,
-    PathElement, Rule, RuleBody, RuleDocument,
-};
+use minecraft_analysis_core::rules::{LoadedRules, SourceProfile};
 use minecraft_analysis_core::world::SafePaths;
 use sha2::{Digest, Sha256};
 
@@ -26,10 +22,10 @@ fn list(values: Vec<Value>) -> Value {
 }
 
 #[test]
-fn schema_three_imported_orientation_map_converts_all_values_and_rejects_unknowns() {
+fn action_schema_is_rejected_without_compatibility_conversion() {
     let directory = tempfile::tempdir().unwrap();
-    let maps = directory.path().join("maps.json");
-    let rules = directory.path().join("rules.json");
+    let maps = directory.path().join("maps.yaml");
+    let rules = directory.path().join("rules.yaml");
     fs::write(
         &maps,
         r#"{
@@ -49,7 +45,7 @@ fn schema_three_imported_orientation_map_converts_all_values_and_rejects_unknown
         &rules,
         r#"{
       "schema_version":3,"rule_set":"buildcraft-engines","source_profile":"forge-1.7.10",
-      "imports":["maps.json"],"rules":[{
+      "imports":["maps.yaml"],"rules":[{
         "id":"buildcraft:engine-orientation","object":"block_entity",
         "matcher":{"name":"BuildCraft|Energy:Engine"},
         "action":{"action":"transform","patches":[{
@@ -60,65 +56,7 @@ fn schema_three_imported_orientation_map_converts_all_values_and_rejects_unknown
     }"#,
     )
     .unwrap();
-    let loaded = minecraft_analysis_core::rules::load(&rules).unwrap();
-    for (orientation, expected) in ["DOWN", "UP", "NORTH", "SOUTH", "WEST", "EAST"]
-        .into_iter()
-        .enumerate()
-    {
-        let nbt = Value::Compound(BTreeMap::from([(
-            "orientation".into(),
-            Value::Byte(i8::try_from(orientation).unwrap()),
-        )]));
-        let decision = minecraft_analysis_core::rules::evaluate_block_entity(
-            &loaded,
-            "BuildCraft|Energy:Engine",
-            &nbt,
-        );
-        let applied = convert::apply_decision_with_maps(
-            &decision,
-            TransformObject {
-                identity: "BuildCraft|Energy:Engine".into(),
-                numeric: 0,
-                nbt: Some(nbt),
-            },
-            &loaded.value_maps,
-            |_| true,
-        )
-        .unwrap();
-        let Value::Compound(result) = applied.object.unwrap().nbt.unwrap() else {
-            unreachable!()
-        };
-        assert_eq!(
-            result.get("currentDirection"),
-            Some(&Value::String(expected.into()))
-        );
-        assert!(!result.contains_key("orientation"));
-        assert_eq!(
-            applied.map_outcomes[0].mapping.destination,
-            minecraft_analysis_core::rules::TypedNbt::String(expected.into())
-        );
-    }
-    let nbt = Value::Compound(BTreeMap::from([("orientation".into(), Value::Int(6))]));
-    let decision = minecraft_analysis_core::rules::evaluate_block_entity(
-        &loaded,
-        "BuildCraft|Energy:Engine",
-        &nbt,
-    );
-    let error = convert::apply_decision_with_maps(
-        &decision,
-        TransformObject {
-            identity: "BuildCraft|Energy:Engine".into(),
-            numeric: 0,
-            nbt: Some(nbt),
-        },
-        &loaded.value_maps,
-        |_| true,
-    )
-    .unwrap_err();
-    let message = error.to_string();
-    assert!(message.contains("buildcraft:engine-orientation"));
-    assert!(message.contains("buildcraft:legacy-orientation"));
-    assert!(message.contains("Int(6)"));
+    assert!(minecraft_analysis_core::rules::load(&rules).is_err());
 }
 
 fn compound(values: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
@@ -146,50 +84,7 @@ fn catalog(entries: &[(RegistryKind, &str, i32)]) -> RegistryCatalog {
 }
 
 fn empty_rules() -> LoadedRules {
-    let nested = Rule {
-        id: "synthetic:backpack-items".into(),
-        priority: 10,
-        terminal: true,
-        body: RuleBody::Item {
-            matcher: ItemMatcher {
-                identity: IdentityMatcher::Name {
-                    name: "mod:backpack".into(),
-                },
-                damage: NumericPredicate::Any,
-                count: NumericPredicate::Any,
-                nbt: vec![],
-            },
-            action: ObjectAction::Transform {
-                target: None,
-                numeric: None,
-                patches: vec![],
-                nested_items: vec![NbtPath(vec![
-                    PathElement::Field("tag".into()),
-                    PathElement::Field("CustomSlots".into()),
-                ])],
-            },
-        },
-    };
-    LoadedRules {
-        source_profile: minecraft_analysis_core::rules::SourceProfile::Forge1_7_10,
-        documents: vec![(
-            PathBuf::from("synthetic-rules.json"),
-            RuleDocument {
-                schema_version: 1,
-                rule_set: "synthetic-e2e".into(),
-                source_profile: None,
-                imports: vec![],
-                value_maps: vec![],
-                standalone_inventories: vec![],
-                rules: vec![nested.clone()],
-                source_manifest: vec![],
-                target_manifest: vec![],
-            },
-        )],
-        ordered_rules: vec![nested],
-        standalone_inventories: vec![],
-        value_maps: BTreeMap::new(),
-    }
+    LoadedRules::empty(SourceProfile::Forge1_7_10)
 }
 
 fn write_level(path: &Path, target: bool) {
@@ -487,7 +382,7 @@ fn synthetic_multi_dimension_conversion_is_safe_semantic_and_deterministic() {
     let Value::Compound(component) = &nested.values[0] else {
         panic!()
     };
-    assert_eq!(component.get("id"), Some(&Value::Short(601)));
+    assert_eq!(component.get("id"), Some(&Value::Short(501)));
     let (level, _) = nbt::decode(&fs::read(first.join("level.dat")).unwrap()).unwrap();
     let Value::Compound(data) = level.root.get("Data").unwrap() else {
         panic!()

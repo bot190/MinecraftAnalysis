@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::nbt::{List, Tag, Value};
 use crate::registry::{Provenance, RegistryCatalog, RegistryEntry, RegistryKind, RegistryName};
 
-pub const RULE_SCHEMA_VERSION: u32 = 3;
+pub const RULE_SCHEMA_VERSION: u32 = 1;
 pub const MIN_RULE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -41,9 +41,6 @@ pub struct RuleDocument {
     pub imports: Vec<String>,
     #[serde(default)]
     pub value_maps: Vec<ValueMap>,
-    /// Root-relative paths used to discover inventories in standalone NBT files.
-    #[serde(default)]
-    pub standalone_inventories: Vec<NbtPath>,
     #[serde(default)]
     pub rules: Vec<Rule>,
     #[serde(default)]
@@ -85,7 +82,7 @@ pub enum ConflictSelection {
     Manifest,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestKind {
     Block,
@@ -93,35 +90,78 @@ pub enum ManifestKind {
     Other(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Rule {
     pub id: String,
     #[serde(default)]
     pub priority: i32,
-    #[serde(default)]
-    pub terminal: bool,
     #[serde(flatten)]
     pub body: RuleBody,
 }
 
+impl<'de> Deserialize<'de> for Rule {
+    #[allow(clippy::items_after_statements)]
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("rule must be an object"))?;
+        let kind = object
+            .get("object")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        for key in object.keys() {
+            let allowed = matches!(
+                key.as_str(),
+                "id" | "priority" | "object" | "matcher" | "template"
+            ) || (kind == "item" && key == "target_name");
+            if !allowed {
+                return Err(serde::de::Error::unknown_field(
+                    key,
+                    &[
+                        "id",
+                        "priority",
+                        "object",
+                        "matcher",
+                        "template",
+                        "target_name",
+                    ],
+                ));
+            }
+        }
+        #[derive(Deserialize)]
+        struct RawRule {
+            id: String,
+            #[serde(default)]
+            priority: i32,
+            #[serde(flatten)]
+            body: RuleBody,
+        }
+        let raw: RawRule = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            id: raw.id,
+            priority: raw.priority,
+            body: raw.body,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "object", rename_all = "snake_case")]
+#[serde(tag = "object", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuleBody {
     Block {
         matcher: BlockMatcher,
-        action: ObjectAction,
+        template: String,
     },
     Item {
         matcher: ItemMatcher,
-        action: ObjectAction,
+        template: String,
+        #[serde(default)]
+        target_name: Option<String>,
     },
     Entity {
         matcher: NamedMatcher,
-        action: ObjectAction,
-    },
-    BlockEntity {
-        matcher: NamedMatcher,
-        action: ObjectAction,
+        template: String,
     },
 }
 
@@ -199,35 +239,6 @@ impl NumericPredicate {
             Self::Range { min, max } => (min..=max).contains(&candidate),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum ObjectAction {
-    Transform {
-        #[serde(default)]
-        target: Option<String>,
-        #[serde(default)]
-        numeric: Option<NumericTransform>,
-        #[serde(default)]
-        patches: Vec<NbtPatch>,
-        #[serde(default)]
-        nested_items: Vec<NbtPath>,
-    },
-    Delete,
-    ReplaceWithAir,
-    DropItem,
-    DiscardNbt,
-    Substitute {
-        target: String,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum NumericTransform {
-    Set { value: i64 },
-    Clamp { min: i64, max: i64 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -362,68 +373,78 @@ impl From<NbtType> for Tag {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "patch", rename_all = "snake_case")]
-pub enum NbtPatch {
-    Set {
-        path: NbtPath,
-        value: TypedNbt,
-    },
-    Remove {
-        path: NbtPath,
-    },
-    Rename {
-        path: NbtPath,
-        to: String,
-    },
-    Copy {
-        from: NbtPath,
-        to: NbtPath,
-    },
-    Move {
-        from: NbtPath,
-        to: NbtPath,
-    },
-    ConvertNumber {
-        path: NbtPath,
-        to: NumericType,
-    },
-    MapValue {
-        from: NbtPath,
-        to: NbtPath,
-        using: String,
-        #[serde(default)]
-        remove_source: bool,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NumericType {
-    Byte,
-    Short,
-    Int,
-    Long,
-    Float,
-    Double,
-}
-
 #[derive(Clone, Debug)]
 pub struct LoadedRules {
     pub documents: Vec<(PathBuf, RuleDocument)>,
     pub source_profile: SourceProfile,
     pub ordered_rules: Vec<Rule>,
-    pub standalone_inventories: Vec<NbtPath>,
     pub value_maps: BTreeMap<String, ValueMap>,
+    pub template_runtime: std::sync::Arc<crate::template::TemplateRuntime>,
+    pub template_names: Vec<String>,
+    pub indices: RuleIndices,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MapOutcome {
-    pub map_id: String,
-    pub from: NbtPath,
-    pub to: NbtPath,
-    pub source: TypedNbt,
-    pub destination: TypedNbt,
+#[derive(Clone, Debug, Default)]
+pub struct RuleIndices {
+    pub block_names: BTreeMap<String, Vec<usize>>,
+    pub block_legacy: BTreeMap<i32, Vec<usize>>,
+    pub item_names: BTreeMap<String, Vec<usize>>,
+    pub item_legacy: BTreeMap<i32, Vec<usize>>,
+    pub entity_names: BTreeMap<String, Vec<usize>>,
+}
+
+impl LoadedRules {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn empty(source_profile: SourceProfile) -> Self {
+        Self {
+            documents: Vec::new(),
+            source_profile,
+            ordered_rules: Vec::new(),
+            value_maps: BTreeMap::new(),
+            template_runtime: std::sync::Arc::new(
+                crate::template::TemplateRuntime::compile(
+                    std::iter::empty(),
+                    crate::template::TemplateLimits::default(),
+                )
+                .expect("empty template environment compiles"),
+            ),
+            template_names: Vec::new(),
+            indices: RuleIndices::default(),
+        }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_rules(source_profile: SourceProfile, mut rules: Vec<Rule>) -> Self {
+        rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
+        let template_names = rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| crate::template::template_name("test", &rule.id, index))
+            .collect::<Vec<_>>();
+        let templates = rules.iter().zip(&template_names).map(|(rule, name)| {
+            let source = match &rule.body {
+                RuleBody::Block { template, .. }
+                | RuleBody::Item { template, .. }
+                | RuleBody::Entity { template, .. } => template.clone(),
+            };
+            (name.clone(), source)
+        });
+        let runtime = crate::template::TemplateRuntime::compile(
+            templates,
+            crate::template::TemplateLimits::default(),
+        )
+        .expect("test templates compile");
+        Self {
+            source_profile,
+            indices: build_indices(&rules),
+            ordered_rules: rules,
+            template_names,
+            template_runtime: std::sync::Arc::new(runtime),
+            ..Self::empty(source_profile)
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -433,15 +454,22 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("invalid JSON rule document {path}: {source}")]
-    Json {
+    #[error("rule document {path} must use a .yaml or .yml extension")]
+    Format { path: PathBuf },
+    #[error("JSON rule document {path} is unsupported; rewrite it as YAML")]
+    JsonUnsupported { path: PathBuf },
+    #[error("invalid YAML rule document {path}: {source}")]
+    Yaml {
         path: PathBuf,
-        source: serde_json::Error,
+        source: serde_yaml::Error,
+    },
+    #[error("template preparation failed: {source}")]
+    Template {
+        #[source]
+        source: crate::template::TemplateError,
     },
     #[error("unsupported rule schema {actual}; supported schema range is {MIN_RULE_SCHEMA_VERSION}..={RULE_SCHEMA_VERSION}")]
     Schema { actual: u32 },
-    #[error("rule schema 1 document {path} cannot declare source_profile")]
-    LegacySourceProfile { path: PathBuf },
     #[error("rule graph does not declare a source profile")]
     MissingSourceProfile,
     #[error("cannot validate candidate rules against an empty rule context")]
@@ -460,8 +488,6 @@ pub enum Error {
         first: PathBuf,
         second: PathBuf,
     },
-    #[error("rule schema {schema} document {path} uses value-map syntax, which requires schema 3")]
-    ValueMapRequiresSchema3 { schema: u32, path: PathBuf },
     #[error("value map {map_id} in {path} must contain at least one entry")]
     EmptyValueMap { map_id: String, path: PathBuf },
     #[error("value map {map_id} in {path} contains duplicate source entry {value:?}")]
@@ -477,24 +503,12 @@ pub enum Error {
         first: TypedNbt,
         second: TypedNbt,
     },
-    #[error("rule {rule_id} references unknown value map {map_id}")]
-    UnknownValueMap { rule_id: String, map_id: String },
-    #[error("rule {rule_id} map_value patch cannot remove source path {from:?} after writing the same destination")]
-    MapValueSamePath { rule_id: String, from: NbtPath },
-    #[error("value map {map_id} has no entry for source path {path:?} value {value:?}")]
-    UnmappedValue {
-        map_id: String,
-        path: NbtPath,
-        value: TypedNbt,
-    },
     #[error("rule import cycle at {0}")]
     ImportCycle(PathBuf),
     #[error("invalid registry identity in rule: {0}")]
     Registry(#[from] crate::registry::Error),
     #[error("legacy numeric matcher must explicitly select block or item registry")]
     AmbiguousLegacyMatcher,
-    #[error("terminal rules {first} and {second} have equal precedence and conflicting actions")]
-    AmbiguousRules { first: String, second: String },
     #[error("manifest entry {kind:?} {name}={numeric_id} contradicts world registry evidence without an explicit conflict selection")]
     ManifestConflict {
         kind: RegistryKind,
@@ -509,22 +523,6 @@ pub enum Error {
         name: RegistryName,
         numeric_id: i32,
     },
-    #[error("NBT path does not exist: {0:?}")]
-    MissingPath(NbtPath),
-    #[error("NBT path parent has an incompatible type: {0:?}")]
-    PathType(NbtPath),
-    #[error("cannot convert {value} to {target:?} without overflow or precision loss")]
-    NumericOverflow { value: String, target: NumericType },
-    #[error("nested item recursion exceeded depth limit {limit}; invocation chain: {chain:?}")]
-    NestedDepth { limit: usize, chain: Vec<String> },
-    #[error("nested item traversal exceeded object limit {limit}; invocation chain: {chain:?}")]
-    NestedCount { limit: usize, chain: Vec<String> },
-    #[error("nested item rule invocation cycle: {chain:?}")]
-    NestedCycle { chain: Vec<String> },
-    #[error("nested item path {path:?} selected a non-compound/non-list value")]
-    NestedType { path: NbtPath },
-    #[error("standalone inventory path must contain at least one component")]
-    EmptyStandaloneInventoryPath,
 }
 
 /// Load rule documents and their relative imports in deterministic depth-first order.
@@ -571,6 +569,19 @@ fn load_one(
     completed: &mut BTreeSet<PathBuf>,
     loaded: &mut Vec<(PathBuf, RuleDocument)>,
 ) -> Result<(), Error> {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("yaml" | "yml") => {}
+        Some("json") => {
+            return Err(Error::JsonUnsupported {
+                path: path.to_owned(),
+            });
+        }
+        _ => {
+            return Err(Error::Format {
+                path: path.to_owned(),
+            });
+        }
+    }
     let canonical = fs::canonicalize(path).map_err(|source| Error::Read {
         path: path.to_owned(),
         source,
@@ -585,7 +596,7 @@ fn load_one(
         path: canonical.clone(),
         source,
     })?;
-    let document: RuleDocument = serde_json::from_slice(&bytes).map_err(|source| Error::Json {
+    let document: RuleDocument = serde_yaml::from_slice(&bytes).map_err(|source| Error::Yaml {
         path: canonical.clone(),
         source,
     })?;
@@ -608,33 +619,18 @@ fn validate_loaded(documents: Vec<(PathBuf, RuleDocument)>) -> Result<LoadedRule
     let mut sets = BTreeSet::new();
     let mut rules = BTreeSet::new();
     let mut ordered_rules = Vec::new();
-    let mut standalone_inventories = BTreeSet::new();
     let mut declarations = BTreeMap::<SourceProfile, Vec<PathBuf>>::new();
     let mut value_maps = BTreeMap::<String, ValueMap>::new();
     let mut map_paths = BTreeMap::<String, PathBuf>::new();
+    let mut rule_origins = BTreeMap::<String, PathBuf>::new();
     for (path, document) in &documents {
         if !(MIN_RULE_SCHEMA_VERSION..=RULE_SCHEMA_VERSION).contains(&document.schema_version) {
             return Err(Error::Schema {
                 actual: document.schema_version,
             });
         }
-        if document.schema_version == 1 {
-            if document.source_profile.is_some() {
-                return Err(Error::LegacySourceProfile { path: path.clone() });
-            }
-            declarations
-                .entry(SourceProfile::Forge1_7_10)
-                .or_default()
-                .push(path.clone());
-        } else if let Some(profile) = document.source_profile {
+        if let Some(profile) = document.source_profile {
             declarations.entry(profile).or_default().push(path.clone());
-        }
-        let uses_map_patch = document.rules.iter().any(rule_uses_value_map);
-        if document.schema_version < 3 && (!document.value_maps.is_empty() || uses_map_patch) {
-            return Err(Error::ValueMapRequiresSchema3 {
-                schema: document.schema_version,
-                path: path.clone(),
-            });
         }
         validate_id(&document.rule_set)?;
         if !sets.insert(document.rule_set.clone()) {
@@ -652,44 +648,17 @@ fn validate_loaded(documents: Vec<(PathBuf, RuleDocument)>) -> Result<LoadedRule
             }
             value_maps.insert(value_map.id.clone(), value_map.clone());
         }
-        for path in &document.standalone_inventories {
-            if path.0.is_empty() {
-                return Err(Error::EmptyStandaloneInventoryPath);
-            }
-            standalone_inventories.insert(path.clone());
-        }
         for rule in &document.rules {
             validate_id(&rule.id)?;
             validate_rule(rule)?;
             if !rules.insert(rule.id.clone()) {
                 return Err(Error::DuplicateRule(rule.id.clone()));
             }
+            rule_origins.insert(rule.id.clone(), path.clone());
             ordered_rules.push(rule.clone());
         }
     }
-    for (_, document) in &documents {
-        for rule in &document.rules {
-            validate_map_references(rule, &value_maps)?;
-        }
-    }
-    ordered_rules.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.id.cmp(&b.id)));
-    for (index, first) in ordered_rules.iter().enumerate() {
-        for second in &ordered_rules[index + 1..] {
-            if first.priority != second.priority {
-                break;
-            }
-            if first.terminal
-                && second.terminal
-                && same_match_scope(&first.body, &second.body)
-                && action_of(&first.body) != action_of(&second.body)
-            {
-                return Err(Error::AmbiguousRules {
-                    first: first.id.clone(),
-                    second: second.id.clone(),
-                });
-            }
-        }
-    }
+    ordered_rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
     if declarations.is_empty() {
         return Err(Error::MissingSourceProfile);
     }
@@ -706,20 +675,47 @@ fn validate_loaded(documents: Vec<(PathBuf, RuleDocument)>) -> Result<LoadedRule
         return Err(Error::ConflictingSourceProfiles { declarations });
     }
     let source_profile = *declarations.keys().next().expect("non-empty declarations");
+    let template_names = ordered_rules
+        .iter()
+        .enumerate()
+        .map(|(ordinal, rule)| {
+            crate::template::template_name(
+                &rule_origins[&rule.id].to_string_lossy(),
+                &rule.id,
+                ordinal,
+            )
+        })
+        .collect::<Vec<_>>();
+    let templates = ordered_rules
+        .iter()
+        .zip(&template_names)
+        .map(|(rule, name)| {
+            let source = match &rule.body {
+                RuleBody::Block { template, .. }
+                | RuleBody::Item { template, .. }
+                | RuleBody::Entity { template, .. } => template.clone(),
+            };
+            (name.clone(), source)
+        });
+    let template_runtime = crate::template::TemplateRuntime::compile_with_value_maps(
+        templates,
+        crate::template::TemplateLimits::default(),
+        value_maps.clone(),
+    )
+    .map_err(|source| Error::Template { source })?;
+    let indices = build_indices(&ordered_rules);
     Ok(LoadedRules {
         documents,
         source_profile,
         ordered_rules,
-        standalone_inventories: standalone_inventories.into_iter().collect(),
         value_maps,
+        template_runtime: std::sync::Arc::new(template_runtime),
+        template_names,
+        indices,
     })
 }
 
-fn rule_uses_value_map(rule: &Rule) -> bool {
-    matches!(action_of(&rule.body), ObjectAction::Transform { patches, .. } if patches.iter().any(|patch| matches!(patch, NbtPatch::MapValue { .. })))
-}
-
-fn validate_value_map(value_map: &ValueMap, path: &Path) -> Result<(), Error> {
+pub(crate) fn validate_value_map(value_map: &ValueMap, path: &Path) -> Result<(), Error> {
     if value_map.entries.is_empty() {
         return Err(Error::EmptyValueMap {
             map_id: value_map.id.clone(),
@@ -752,74 +748,6 @@ fn validate_value_map(value_map: &ValueMap, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_map_references(rule: &Rule, maps: &BTreeMap<String, ValueMap>) -> Result<(), Error> {
-    let ObjectAction::Transform { patches, .. } = action_of(&rule.body) else {
-        return Ok(());
-    };
-    for patch in patches {
-        if let NbtPatch::MapValue {
-            from,
-            to,
-            using,
-            remove_source,
-        } = patch
-        {
-            if !maps.contains_key(using) {
-                return Err(Error::UnknownValueMap {
-                    rule_id: rule.id.clone(),
-                    map_id: using.clone(),
-                });
-            }
-            if *remove_source && from == to {
-                return Err(Error::MapValueSamePath {
-                    rule_id: rule.id.clone(),
-                    from: from.clone(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn same_match_scope(first: &RuleBody, second: &RuleBody) -> bool {
-    match (first, second) {
-        (
-            RuleBody::Block { matcher: first, .. },
-            RuleBody::Block {
-                matcher: second, ..
-            },
-        ) => first == second,
-        (
-            RuleBody::Item { matcher: first, .. },
-            RuleBody::Item {
-                matcher: second, ..
-            },
-        ) => first == second,
-        (
-            RuleBody::Entity { matcher: first, .. },
-            RuleBody::Entity {
-                matcher: second, ..
-            },
-        )
-        | (
-            RuleBody::BlockEntity { matcher: first, .. },
-            RuleBody::BlockEntity {
-                matcher: second, ..
-            },
-        ) => first == second,
-        _ => false,
-    }
-}
-
-fn action_of(body: &RuleBody) -> &ObjectAction {
-    match body {
-        RuleBody::Block { action, .. }
-        | RuleBody::Item { action, .. }
-        | RuleBody::Entity { action, .. }
-        | RuleBody::BlockEntity { action, .. } => action,
-    }
-}
-
 fn validate_id(value: &str) -> Result<(), Error> {
     if value.is_empty()
         || !value.bytes().all(|byte| {
@@ -831,11 +759,57 @@ fn validate_id(value: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn build_indices(rules: &[Rule]) -> RuleIndices {
+    let mut indices = RuleIndices::default();
+    for (index, rule) in rules.iter().enumerate() {
+        match &rule.body {
+            RuleBody::Block { matcher, .. } => match &matcher.identity {
+                IdentityMatcher::Name { name } => indices
+                    .block_names
+                    .entry(name.clone())
+                    .or_default()
+                    .push(index),
+                IdentityMatcher::Legacy {
+                    legacy_id,
+                    registry: ManifestKind::Block,
+                } => indices
+                    .block_legacy
+                    .entry(*legacy_id)
+                    .or_default()
+                    .push(index),
+                IdentityMatcher::Legacy { .. } => {}
+            },
+            RuleBody::Item { matcher, .. } => match &matcher.identity {
+                IdentityMatcher::Name { name } => indices
+                    .item_names
+                    .entry(name.clone())
+                    .or_default()
+                    .push(index),
+                IdentityMatcher::Legacy {
+                    legacy_id,
+                    registry: ManifestKind::Item,
+                } => indices
+                    .item_legacy
+                    .entry(*legacy_id)
+                    .or_default()
+                    .push(index),
+                IdentityMatcher::Legacy { .. } => {}
+            },
+            RuleBody::Entity { matcher, .. } => indices
+                .entity_names
+                .entry(matcher.name.clone())
+                .or_default()
+                .push(index),
+        }
+    }
+    indices
+}
+
 fn validate_rule(rule: &Rule) -> Result<(), Error> {
     let identity = match &rule.body {
         RuleBody::Block { matcher, .. } => Some(&matcher.identity),
         RuleBody::Item { matcher, .. } => Some(&matcher.identity),
-        _ => None,
+        RuleBody::Entity { .. } => None,
     };
     if let Some(identity) = identity {
         match identity {
@@ -876,7 +850,7 @@ pub fn identity_matches(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RuleTrace {
+pub struct CandidateOutcome {
     pub rule_id: String,
     pub priority: i32,
     pub matched: bool,
@@ -888,31 +862,29 @@ pub struct RuleTrace {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decision {
-    pub actions: Vec<(String, ObjectAction)>,
-    pub trace: Vec<RuleTrace>,
+    pub selected_rule: Option<String>,
+    pub candidates: Vec<CandidateOutcome>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoordinatedBlockDecision {
     pub block: Decision,
-    pub block_entity: Option<Decision>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SelectedAction<'a> {
-    pub rule_id: &'a str,
-    pub action: &'a ObjectAction,
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectedTemplate<'a> {
+    pub rule: &'a Rule,
+    pub template_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionDecision<'a> {
-    pub actions: Vec<SelectedAction<'a>>,
+    pub selected: Option<SelectedTemplate<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoordinatedBlockExecutionDecision<'a> {
     pub block: ExecutionDecision<'a>,
-    pub block_entity: Option<ExecutionDecision<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -934,46 +906,41 @@ impl MatchOutcome {
     }
 }
 
-fn select_actions<'a>(
+fn select_template<'a>(
     rules: &'a LoadedRules,
-    mut matches: impl FnMut(&'a Rule) -> Option<(&'a ObjectAction, MatchOutcome)>,
-) -> (Vec<SelectedAction<'a>>, Vec<(&'a Rule, MatchOutcome)>) {
-    let mut selected = Vec::new();
+    candidates: impl IntoIterator<Item = usize>,
+    mut matches: impl FnMut(&'a Rule) -> MatchOutcome,
+) -> (Option<SelectedTemplate<'a>>, Vec<(&'a Rule, MatchOutcome)>) {
+    let mut selected = None;
     let mut outcomes = Vec::new();
-    for rule in &rules.ordered_rules {
-        let Some((action, outcome)) = matches(rule) else {
-            continue;
-        };
+    for index in candidates {
+        let rule = &rules.ordered_rules[index];
+        let outcome = matches(rule);
         outcomes.push((rule, outcome));
         if outcome.matched() {
-            selected.push(SelectedAction {
-                rule_id: &rule.id,
-                action,
+            selected = Some(SelectedTemplate {
+                rule,
+                template_name: rules.template_names[index].clone(),
             });
-            if rule.terminal {
-                break;
-            }
+            break;
         }
     }
     (selected, outcomes)
 }
 
 fn diagnostic_decision(
-    selected: Vec<SelectedAction<'_>>,
+    selected: Option<SelectedTemplate<'_>>,
     outcomes: Vec<(&Rule, MatchOutcome)>,
     reason: impl Fn(MatchOutcome) -> String,
 ) -> Decision {
     Decision {
-        actions: selected
-            .into_iter()
-            .map(|selected| (selected.rule_id.to_owned(), selected.action.clone()))
-            .collect(),
-        trace: outcomes
+        selected_rule: selected.map(|selected| selected.rule.id.clone()),
+        candidates: outcomes
             .into_iter()
             .map(|(rule, outcome)| {
                 #[cfg(test)]
                 TRACE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
-                RuleTrace {
+                CandidateOutcome {
                     rule_id: rule.id.clone(),
                     priority: rule.priority,
                     matched: outcome.matched(),
@@ -1015,9 +982,10 @@ pub fn evaluate_item(
     count: i32,
     nbt: Option<&Value>,
 ) -> Decision {
-    let (selected, outcomes) = select_actions(rules, |rule| {
-        let RuleBody::Item { matcher, action } = &rule.body else {
-            return None;
+    let candidates = item_candidates(rules, name, numeric_id);
+    let (selected, outcomes) = select_template(rules, candidates, |rule| {
+        let RuleBody::Item { matcher, .. } = &rule.body else {
+            unreachable!("item index contains only item rules");
         };
         let identity = identity_matches(&matcher.identity, kind, name, numeric_id);
         let damage_matches = matcher.damage.matches(i64::from(damage));
@@ -1026,16 +994,13 @@ pub fn evaluate_item(
             .nbt
             .iter()
             .all(|predicate| nbt.is_some_and(|root| predicate_matches(root, predicate)));
-        Some((
-            action,
-            MatchOutcome {
-                identity,
-                numeric: Some(damage_matches),
-                count: Some(count_matches),
-                nbt: predicates,
-                associated: None,
-            },
-        ))
+        MatchOutcome {
+            identity,
+            numeric: Some(damage_matches),
+            count: Some(count_matches),
+            nbt: predicates,
+            associated: None,
+        }
     });
     diagnostic_decision(selected, outcomes, |outcome| {
         format!(
@@ -1058,25 +1023,38 @@ pub fn evaluate_item_for_execution<'a>(
     count: i32,
     nbt: Option<&Value>,
 ) -> ExecutionDecision<'a> {
-    let (actions, _) = select_actions(rules, |rule| {
-        let RuleBody::Item { matcher, action } = &rule.body else {
-            return None;
+    let candidates = item_candidates(rules, name, numeric_id);
+    let (selected, _) = select_template(rules, candidates, |rule| {
+        let RuleBody::Item { matcher, .. } = &rule.body else {
+            unreachable!("item index contains only item rules");
         };
-        Some((
-            action,
-            MatchOutcome {
-                identity: identity_matches(&matcher.identity, kind, name, numeric_id),
-                numeric: Some(matcher.damage.matches(i64::from(damage))),
-                count: Some(matcher.count.matches(i64::from(count))),
-                nbt: matcher
-                    .nbt
-                    .iter()
-                    .all(|predicate| nbt.is_some_and(|root| predicate_matches(root, predicate))),
-                associated: None,
-            },
-        ))
+        MatchOutcome {
+            identity: identity_matches(&matcher.identity, kind, name, numeric_id),
+            numeric: Some(matcher.damage.matches(i64::from(damage))),
+            count: Some(matcher.count.matches(i64::from(count))),
+            nbt: matcher
+                .nbt
+                .iter()
+                .all(|predicate| nbt.is_some_and(|root| predicate_matches(root, predicate))),
+            associated: None,
+        }
     });
-    ExecutionDecision { actions }
+    ExecutionDecision { selected }
+}
+
+fn item_candidates(rules: &LoadedRules, name: &RegistryName, numeric_id: i32) -> Vec<usize> {
+    let mut candidates = rules
+        .indices
+        .item_names
+        .get(name.as_str())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(legacy) = rules.indices.item_legacy.get(&numeric_id) {
+        candidates.extend(legacy);
+        candidates.sort_unstable();
+        candidates.dedup();
+    }
+    candidates
 }
 
 fn evaluate_block_with_entity(
@@ -1088,9 +1066,10 @@ fn evaluate_block_with_entity(
     nbt: Option<&Value>,
     block_entity: Option<(&str, &Value)>,
 ) -> Decision {
-    let (selected, outcomes) = select_actions(rules, |rule| {
-        let RuleBody::Block { matcher, action } = &rule.body else {
-            return None;
+    let candidates = block_candidates(rules, name, numeric_id);
+    let (selected, outcomes) = select_template(rules, candidates, |rule| {
+        let RuleBody::Block { matcher, .. } = &rule.body else {
+            unreachable!("block index contains only block rules");
         };
         let identity = identity_matches(&matcher.identity, kind, name, numeric_id);
         let numeric = matcher.metadata.matches(i64::from(metadata));
@@ -1101,16 +1080,13 @@ fn evaluate_block_with_entity(
         let associated = matcher.block_entity.as_ref().is_none_or(|expected| {
             block_entity.is_some_and(|(name, nbt)| named_matches(expected, name, nbt))
         });
-        Some((
-            action,
-            MatchOutcome {
-                identity,
-                numeric: Some(numeric),
-                count: None,
-                nbt: predicates,
-                associated: Some(associated),
-            },
-        ))
+        MatchOutcome {
+            identity,
+            numeric: Some(numeric),
+            count: None,
+            nbt: predicates,
+            associated: Some(associated),
+        }
     });
     diagnostic_decision(selected, outcomes, |outcome| {
         format!(
@@ -1132,27 +1108,40 @@ fn evaluate_block_for_execution_with_entity<'a>(
     nbt: Option<&Value>,
     block_entity: Option<(&str, &Value)>,
 ) -> ExecutionDecision<'a> {
-    let (actions, _) = select_actions(rules, |rule| {
-        let RuleBody::Block { matcher, action } = &rule.body else {
-            return None;
+    let candidates = block_candidates(rules, name, numeric_id);
+    let (selected, _) = select_template(rules, candidates, |rule| {
+        let RuleBody::Block { matcher, .. } = &rule.body else {
+            unreachable!("block index contains only block rules");
         };
-        Some((
-            action,
-            MatchOutcome {
-                identity: identity_matches(&matcher.identity, kind, name, numeric_id),
-                numeric: Some(matcher.metadata.matches(i64::from(metadata))),
-                count: None,
-                nbt: matcher
-                    .nbt
-                    .iter()
-                    .all(|predicate| nbt.is_some_and(|root| predicate_matches(root, predicate))),
-                associated: Some(matcher.block_entity.as_ref().is_none_or(|expected| {
-                    block_entity.is_some_and(|(name, nbt)| named_matches(expected, name, nbt))
-                })),
-            },
-        ))
+        MatchOutcome {
+            identity: identity_matches(&matcher.identity, kind, name, numeric_id),
+            numeric: Some(matcher.metadata.matches(i64::from(metadata))),
+            count: None,
+            nbt: matcher
+                .nbt
+                .iter()
+                .all(|predicate| nbt.is_some_and(|root| predicate_matches(root, predicate))),
+            associated: Some(matcher.block_entity.as_ref().is_none_or(|expected| {
+                block_entity.is_some_and(|(name, nbt)| named_matches(expected, name, nbt))
+            })),
+        }
     });
-    ExecutionDecision { actions }
+    ExecutionDecision { selected }
+}
+
+fn block_candidates(rules: &LoadedRules, name: &RegistryName, numeric_id: i32) -> Vec<usize> {
+    let mut candidates = rules
+        .indices
+        .block_names
+        .get(name.as_str())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(legacy) = rules.indices.block_legacy.get(&numeric_id) {
+        candidates.extend(legacy);
+        candidates.sort_unstable();
+        candidates.dedup();
+    }
+    candidates
 }
 
 #[must_use]
@@ -1170,13 +1159,7 @@ pub fn evaluate_block_for_execution<'a>(
 /// Evaluate entity rules using namespaced persisted identity and typed NBT.
 #[must_use]
 pub fn evaluate_entity(rules: &LoadedRules, name: &str, nbt: &Value) -> Decision {
-    evaluate_named(rules, name, nbt, false)
-}
-
-/// Evaluate block-entity rules using namespaced persisted identity and typed NBT.
-#[must_use]
-pub fn evaluate_block_entity(rules: &LoadedRules, name: &str, nbt: &Value) -> Decision {
-    evaluate_named(rules, name, nbt, true)
+    evaluate_named(rules, name, nbt)
 }
 
 #[must_use]
@@ -1185,16 +1168,7 @@ pub fn evaluate_entity_for_execution<'a>(
     name: &str,
     nbt: &Value,
 ) -> ExecutionDecision<'a> {
-    evaluate_named_for_execution(rules, name, nbt, false)
-}
-
-#[must_use]
-pub fn evaluate_block_entity_for_execution<'a>(
-    rules: &'a LoadedRules,
-    name: &str,
-    nbt: &Value,
-) -> ExecutionDecision<'a> {
-    evaluate_named_for_execution(rules, name, nbt, true)
+    evaluate_named_for_execution(rules, name, nbt)
 }
 
 /// Evaluate a block and its optional colocated block entity as one immutable result.
@@ -1218,8 +1192,6 @@ pub fn evaluate_coordinated_block(
             block_nbt,
             block_entity,
         ),
-        block_entity: block_entity
-            .map(|(entity_name, nbt)| evaluate_block_entity(rules, entity_name, nbt)),
     }
 }
 
@@ -1243,9 +1215,64 @@ pub fn evaluate_coordinated_block_for_execution<'a>(
             block_nbt,
             block_entity,
         ),
-        block_entity: block_entity
-            .map(|(entity_name, nbt)| evaluate_block_entity_for_execution(rules, entity_name, nbt)),
     }
+}
+
+/// Render a selected block template, if any.
+///
+/// # Errors
+/// Returns contextual template render or typed-decode failures.
+pub fn render_block(
+    rules: &LoadedRules,
+    decision: &ExecutionDecision<'_>,
+    context: crate::template::BlockContext,
+    callbacks: crate::template::TemplateCallbacks,
+) -> Result<Option<crate::template::BlockResult>, Error> {
+    decision.selected.as_ref().map_or(Ok(None), |selected| {
+        rules
+            .template_runtime
+            .render_with_callbacks(&selected.template_name, context.original, callbacks)
+            .map(Some)
+            .map_err(|source| Error::Template { source })
+    })
+}
+
+/// Render a selected item template, if any.
+///
+/// # Errors
+/// Returns contextual template render or typed-decode failures.
+pub fn render_item(
+    rules: &LoadedRules,
+    decision: &ExecutionDecision<'_>,
+    context: crate::template::ItemContext,
+    callbacks: crate::template::TemplateCallbacks,
+) -> Result<Option<crate::template::ItemResult>, Error> {
+    decision.selected.as_ref().map_or(Ok(None), |selected| {
+        rules
+            .template_runtime
+            .render_with_callbacks(&selected.template_name, context.original, callbacks)
+            .map(Some)
+            .map_err(|source| Error::Template { source })
+    })
+}
+
+/// Render a selected entity template, if any.
+///
+/// # Errors
+/// Returns contextual template render or typed-decode failures.
+pub fn render_entity(
+    rules: &LoadedRules,
+    decision: &ExecutionDecision<'_>,
+    context: crate::template::EntityContext,
+    callbacks: crate::template::TemplateCallbacks,
+) -> Result<Option<crate::template::EntityResult>, Error> {
+    decision.selected.as_ref().map_or(Ok(None), |selected| {
+        rules
+            .template_runtime
+            .render_with_callbacks(&selected.template_name, context.original, callbacks)
+            .map(Some)
+            .map_err(|source| Error::Template { source })
+    })
 }
 
 fn named_matches(matcher: &NamedMatcher, name: &str, nbt: &Value) -> bool {
@@ -1256,28 +1283,29 @@ fn named_matches(matcher: &NamedMatcher, name: &str, nbt: &Value) -> bool {
             .all(|predicate| predicate_matches(nbt, predicate))
 }
 
-fn evaluate_named(rules: &LoadedRules, name: &str, nbt: &Value, block_entity: bool) -> Decision {
-    let (selected, outcomes) = select_actions(rules, |rule| {
-        let ((RuleBody::BlockEntity { matcher, action }, true)
-        | (RuleBody::Entity { matcher, action }, false)) = (&rule.body, block_entity)
-        else {
-            return None;
+fn evaluate_named(rules: &LoadedRules, name: &str, nbt: &Value) -> Decision {
+    let candidates = rules
+        .indices
+        .entity_names
+        .get(name)
+        .cloned()
+        .unwrap_or_default();
+    let (selected, outcomes) = select_template(rules, candidates, |rule| {
+        let RuleBody::Entity { matcher, .. } = &rule.body else {
+            unreachable!("entity index contains only entity rules");
         };
         let identity = matcher.name == name;
         let predicates = matcher
             .nbt
             .iter()
             .all(|predicate| predicate_matches(nbt, predicate));
-        Some((
-            action,
-            MatchOutcome {
-                identity,
-                numeric: None,
-                count: None,
-                nbt: predicates,
-                associated: None,
-            },
-        ))
+        MatchOutcome {
+            identity,
+            numeric: None,
+            count: None,
+            nbt: predicates,
+            associated: None,
+        }
     });
     diagnostic_decision(selected, outcomes, |outcome| {
         format!("identity={}, nbt={}", outcome.identity, outcome.nbt)
@@ -1288,29 +1316,29 @@ fn evaluate_named_for_execution<'a>(
     rules: &'a LoadedRules,
     name: &str,
     nbt: &Value,
-    block_entity: bool,
 ) -> ExecutionDecision<'a> {
-    let (actions, _) = select_actions(rules, |rule| {
-        let ((RuleBody::BlockEntity { matcher, action }, true)
-        | (RuleBody::Entity { matcher, action }, false)) = (&rule.body, block_entity)
-        else {
-            return None;
+    let candidates = rules
+        .indices
+        .entity_names
+        .get(name)
+        .cloned()
+        .unwrap_or_default();
+    let (selected, _) = select_template(rules, candidates, |rule| {
+        let RuleBody::Entity { matcher, .. } = &rule.body else {
+            unreachable!("entity index contains only entity rules");
         };
-        Some((
-            action,
-            MatchOutcome {
-                identity: matcher.name == name,
-                numeric: None,
-                count: None,
-                nbt: matcher
-                    .nbt
-                    .iter()
-                    .all(|predicate| predicate_matches(nbt, predicate)),
-                associated: None,
-            },
-        ))
+        MatchOutcome {
+            identity: matcher.name == name,
+            numeric: None,
+            count: None,
+            nbt: matcher
+                .nbt
+                .iter()
+                .all(|predicate| predicate_matches(nbt, predicate)),
+            associated: None,
+        }
     });
-    ExecutionDecision { actions }
+    ExecutionDecision { selected }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1319,105 +1347,340 @@ pub struct NestedLimits {
     pub max_objects: usize,
 }
 
-/// Visit only nested item compounds declared by selected transform rules.
-///
-/// The callback is the normal item-rule pipeline and returns the decision for
-/// the visited stack. Any nested paths selected by that decision are followed
-/// recursively under the same safety budget.
-///
-/// # Errors
-///
-/// Returns a contextual error for a wrong path type, recursion-depth or object
-/// limit, or a repeated rule in the active invocation chain.
-pub fn process_declared_nested_items(
-    root: &mut Value,
-    decision: &Decision,
-    limits: NestedLimits,
-    mut decide: impl FnMut(&mut Value) -> Decision,
-) -> Result<usize, Error> {
-    let mut state = NestedState {
-        limits,
-        objects: 0,
-        chain: Vec::new(),
-    };
-    process_nested(root, decision, 0, &mut state, &mut decide)?;
-    Ok(state.objects)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NestedItemCallOutcome {
+    pub rule_id: Option<String>,
+    pub source: String,
+    pub target: Option<String>,
+    pub dropped: bool,
 }
 
-struct NestedState {
-    limits: NestedLimits,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IdentityMapOutcome {
+    pub numeric_id: i32,
+    pub source: String,
+    pub rule_id: String,
+    pub target: String,
+}
+
+#[derive(Default)]
+struct TemplateExecutionState {
+    depth: usize,
     objects: usize,
     chain: Vec<String>,
+    nested: Vec<NestedItemCallOutcome>,
+    identity_maps: Vec<IdentityMapOutcome>,
+    value_maps: Vec<crate::template::ValueMapCallOutcome>,
 }
 
-fn process_nested(
-    root: &mut Value,
-    decision: &Decision,
-    depth: usize,
-    state: &mut NestedState,
-    decide: &mut impl FnMut(&mut Value) -> Decision,
-) -> Result<(), Error> {
-    let declarations: Vec<_> = decision
-        .actions
-        .iter()
-        .filter_map(|(rule_id, action)| match action {
-            ObjectAction::Transform { nested_items, .. } if !nested_items.is_empty() => {
-                Some((rule_id.clone(), nested_items.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    for (rule_id, paths) in declarations {
-        if state.chain.contains(&rule_id) {
-            let mut chain = state.chain.clone();
-            chain.push(rule_id);
-            return Err(Error::NestedCycle { chain });
-        }
-        state.chain.push(rule_id);
-        for path in paths {
-            let nested =
-                value_at_mut(root, &path).ok_or_else(|| Error::MissingPath(path.clone()))?;
-            match nested {
-                Value::Compound(_) => {
-                    process_nested_item(nested, depth + 1, state, decide)?;
-                }
-                Value::List(list) => {
-                    for item in &mut list.values {
-                        if !matches!(item, Value::Compound(_)) {
-                            return Err(Error::NestedType { path: path.clone() });
-                        }
-                        process_nested_item(item, depth + 1, state, decide)?;
-                    }
-                }
-                _ => return Err(Error::NestedType { path: path.clone() }),
-            }
-        }
-        state.chain.pop();
-    }
-    Ok(())
+struct TemplateExecutor {
+    rules: LoadedRules,
+    source: RegistryCatalog,
+    target: RegistryCatalog,
+    limits: NestedLimits,
+    state: std::sync::Mutex<TemplateExecutionState>,
 }
 
-fn process_nested_item(
-    item: &mut Value,
-    depth: usize,
-    state: &mut NestedState,
-    decide: &mut impl FnMut(&mut Value) -> Decision,
-) -> Result<(), Error> {
-    if depth > state.limits.max_depth {
-        return Err(Error::NestedDepth {
-            limit: state.limits.max_depth,
-            chain: state.chain.clone(),
-        });
+impl TemplateExecutor {
+    fn callbacks(self: &std::sync::Arc<Self>) -> crate::template::TemplateCallbacks {
+        let transform = std::sync::Arc::clone(self);
+        let map = std::sync::Arc::clone(self);
+        let record = std::sync::Arc::clone(self);
+        crate::template::TemplateCallbacks::new(
+            move |item| transform.transform_item(item),
+            move |id| map.map_item_id(id),
+            move |outcome| {
+                record
+                    .state
+                    .lock()
+                    .map_err(template_function_error)?
+                    .value_maps
+                    .push(outcome);
+                Ok(())
+            },
+        )
     }
-    if state.objects >= state.limits.max_objects {
-        return Err(Error::NestedCount {
-            limit: state.limits.max_objects,
-            chain: state.chain.clone(),
+
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+    fn transform_item(
+        self: &std::sync::Arc<Self>,
+        input: minijinja::Value,
+    ) -> Result<minijinja::Value, minijinja::Error> {
+        let json = serde_json::to_value(&input).map_err(template_function_error)?;
+        let typed_stack: TypedNbt =
+            serde_json::from_value(json).map_err(template_function_error)?;
+        let stack = Value::from(typed_stack.clone());
+        let Value::Compound(compound) = &stack else {
+            return Err(template_function_error(
+                "transform_item requires a typed compound stack",
+            ));
+        };
+        let (name, numeric_id) = resolve_template_item(compound, &self.source)?;
+        let original = crate::template::ItemOriginal {
+            name: name.to_string(),
+            numeric_id,
+            count: i8::try_from(template_numeric(compound, "Count"))
+                .map_err(template_function_error)?,
+            damage: i16::try_from(template_numeric(compound, "Damage"))
+                .map_err(template_function_error)?,
+            nbt: typed_stack,
+        };
+        let decision = evaluate_item_for_execution(
+            &self.rules,
+            &RegistryKind::Item,
+            &name,
+            original.numeric_id,
+            i32::from(original.damage),
+            i32::from(original.count),
+            Some(&Value::from(original.nbt.clone())),
+        );
+        let selected_id = decision
+            .selected
+            .as_ref()
+            .map(|selected| selected.rule.id.clone());
+        {
+            let mut state = self.state.lock().map_err(template_function_error)?;
+            if state.depth >= self.limits.max_depth {
+                return Err(template_function_error(format!(
+                    "nested item recursion exceeded depth limit {}",
+                    self.limits.max_depth
+                )));
+            }
+            if state.objects >= self.limits.max_objects {
+                return Err(template_function_error(format!(
+                    "nested item transformation exceeded object limit {}",
+                    self.limits.max_objects
+                )));
+            }
+            if let Some(rule_id) = &selected_id {
+                if state.chain.contains(rule_id) {
+                    let mut chain = state.chain.clone();
+                    chain.push(rule_id.clone());
+                    return Err(template_function_error(format!(
+                        "nested item rule invocation cycle: {chain:?}"
+                    )));
+                }
+                state.chain.push(rule_id.clone());
+            }
+            state.depth += 1;
+            state.objects += 1;
+        }
+        let result = if let Some(selected) = &decision.selected {
+            self.rules
+                .template_runtime
+                .render_with_callbacks::<_, crate::template::ItemResult>(
+                    &selected.template_name,
+                    &original,
+                    self.callbacks(),
+                )
+                .map_err(template_function_error)
+        } else {
+            Ok(crate::template::ItemResult::Unchanged)
+        };
+        let mut state = self.state.lock().map_err(template_function_error)?;
+        state.depth = state.depth.saturating_sub(1);
+        if selected_id.is_some() {
+            state.chain.pop();
+        }
+        let result = result?;
+        let output = match result {
+            crate::template::ItemResult::Drop => None,
+            crate::template::ItemResult::Unchanged => Some(crate::template::TargetItem {
+                name: original.name.clone(),
+                count: original.count,
+                damage: original.damage,
+                nbt: original.nbt,
+            }),
+            crate::template::ItemResult::Transform { item } => Some(item),
+        };
+        let mut output_stack = None;
+        if let Some(item) = &output {
+            let target = RegistryName::parse(&item.name).map_err(template_function_error)?;
+            let target_id = self
+                .target
+                .by_name(&RegistryKind::Item, &target)
+                .map(|entry| entry.numeric_id)
+                .ok_or_else(|| {
+                    template_function_error(format!(
+                        "target item identity `{}` is unavailable",
+                        item.name
+                    ))
+                })?;
+            let mut value = Value::from(item.nbt.clone());
+            let Value::Compound(compound) = &mut value else {
+                return Err(template_function_error(
+                    "transformed item NBT must be a compound",
+                ));
+            };
+            let id = match compound.get("id") {
+                Some(Value::String(_)) => Value::String(item.name.clone()),
+                Some(Value::Int(_)) => Value::Int(target_id),
+                _ => i16::try_from(target_id).map_or(Value::Int(target_id), Value::Short),
+            };
+            compound.insert("id".into(), id);
+            compound.insert("Count".into(), Value::Byte(item.count));
+            compound.insert("Damage".into(), Value::Short(item.damage));
+            output_stack = Some(typed_nbt(&value));
+        }
+        state.nested.push(NestedItemCallOutcome {
+            rule_id: selected_id,
+            source: original.name,
+            target: output.as_ref().map(|item| item.name.clone()),
+            dropped: output.is_none(),
         });
+        Ok(output_stack.map_or_else(
+            || minijinja::Value::from(()),
+            minijinja::Value::from_serialize,
+        ))
     }
-    state.objects += 1;
-    let next = decide(item);
-    process_nested(item, &next, depth, state, decide)
+
+    fn map_item_id(&self, numeric_id: i32) -> Result<minijinja::Value, minijinja::Error> {
+        let entry = self
+            .source
+            .by_numeric(&RegistryKind::Item, numeric_id)
+            .ok_or_else(|| {
+                template_function_error(format!("unresolved source item numeric ID {numeric_id}"))
+            })?;
+        let candidates = item_candidates(&self.rules, &entry.name, numeric_id);
+        let index = *candidates.first().ok_or_else(|| {
+            template_function_error(format!("no item rule maps `{}`", entry.name))
+        })?;
+        let rule = &self.rules.ordered_rules[index];
+        let RuleBody::Item {
+            matcher,
+            target_name,
+            ..
+        } = &rule.body
+        else {
+            unreachable!()
+        };
+        if !matches!(matcher.damage, NumericPredicate::Any)
+            || !matches!(matcher.count, NumericPredicate::Any)
+            || !matcher.nbt.is_empty()
+        {
+            return Err(template_function_error(format!(
+                "item rule `{}` requires complete stack evidence; use transform_item",
+                rule.id
+            )));
+        }
+        let target_name = target_name.as_ref().ok_or_else(|| {
+            template_function_error(format!(
+                "item rule `{}` has no target_name projection",
+                rule.id
+            ))
+        })?;
+        let target = RegistryName::parse(target_name).map_err(template_function_error)?;
+        if self.target.by_name(&RegistryKind::Item, &target).is_none() {
+            return Err(template_function_error(format!(
+                "target item identity `{target_name}` from rule `{}` is unavailable",
+                rule.id
+            )));
+        }
+        self.state
+            .lock()
+            .map_err(template_function_error)?
+            .identity_maps
+            .push(IdentityMapOutcome {
+                numeric_id,
+                source: entry.name.to_string(),
+                rule_id: rule.id.clone(),
+                target: target_name.clone(),
+            });
+        Ok(minijinja::Value::from(target_name.clone()))
+    }
+}
+
+fn resolve_template_item(
+    compound: &BTreeMap<String, Value>,
+    catalog: &RegistryCatalog,
+) -> Result<(RegistryName, i32), minijinja::Error> {
+    if let Some(Value::String(name)) = compound.get("id") {
+        let name = RegistryName::parse(name).map_err(template_function_error)?;
+        let id = catalog
+            .by_name(&RegistryKind::Item, &name)
+            .map(|entry| entry.numeric_id)
+            .ok_or_else(|| {
+                template_function_error(format!("unresolved source item identity `{name}`"))
+            })?;
+        Ok((name, id))
+    } else {
+        let id = template_numeric(compound, "id");
+        catalog
+            .by_numeric(&RegistryKind::Item, id)
+            .map(|entry| (entry.name.clone(), id))
+            .ok_or_else(|| {
+                template_function_error(format!("unresolved source item numeric ID {id}"))
+            })
+    }
+}
+
+fn template_numeric(compound: &BTreeMap<String, Value>, field: &str) -> i32 {
+    match compound.get(field) {
+        Some(Value::Byte(value)) => i32::from(*value),
+        Some(Value::Short(value)) => i32::from(*value),
+        Some(Value::Int(value)) => *value,
+        _ => 0,
+    }
+}
+
+fn template_function_error(error: impl std::fmt::Display) -> minijinja::Error {
+    minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, error.to_string())
+}
+
+#[derive(Clone)]
+pub struct TemplateSession(std::sync::Arc<TemplateExecutor>);
+
+impl TemplateSession {
+    #[must_use]
+    pub fn callbacks(&self) -> crate::template::TemplateCallbacks {
+        self.0.callbacks()
+    }
+
+    #[must_use]
+    pub fn outcomes(
+        &self,
+    ) -> (
+        Vec<NestedItemCallOutcome>,
+        Vec<IdentityMapOutcome>,
+        Vec<crate::template::ValueMapCallOutcome>,
+    ) {
+        let state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.nested.clone(),
+            state.identity_maps.clone(),
+            state.value_maps.clone(),
+        )
+    }
+}
+
+#[must_use]
+pub fn template_session(
+    rules: &LoadedRules,
+    source: &RegistryCatalog,
+    target: &RegistryCatalog,
+    limits: NestedLimits,
+) -> TemplateSession {
+    TemplateSession(std::sync::Arc::new(TemplateExecutor {
+        rules: rules.clone(),
+        source: source.clone(),
+        target: target.clone(),
+        limits,
+        state: std::sync::Mutex::new(TemplateExecutionState::default()),
+    }))
+}
+
+#[must_use]
+pub fn template_callbacks(
+    rules: &LoadedRules,
+    source: &RegistryCatalog,
+    target: &RegistryCatalog,
+    limits: NestedLimits,
+) -> crate::template::TemplateCallbacks {
+    template_session(rules, source, target, limits).callbacks()
 }
 
 /// Apply provenance-aware manifest supplements to a world catalog.
@@ -1525,95 +1788,7 @@ pub fn predicate_matches(root: &Value, predicate: &NbtPredicate) -> bool {
     }
 }
 
-/// Apply typed NBT patches sequentially without passing untouched values through JSON.
-///
-/// # Errors
-///
-/// Returns a path/type error or checked numeric overflow. Earlier patches remain
-/// applied to `root` if a later patch fails.
-pub fn apply_patches(root: &mut Value, patches: &[NbtPatch]) -> Result<(), Error> {
-    apply_patches_with_maps(root, patches, &BTreeMap::new()).map(drop)
-}
-
-/// Apply typed NBT patches with resolved reusable value maps and return each
-/// successful lookup in patch order.
-///
-/// # Errors
-///
-/// Returns a path/type, value-map lookup, or checked numeric overflow error.
-pub fn apply_patches_with_maps(
-    root: &mut Value,
-    patches: &[NbtPatch],
-    maps: &BTreeMap<String, ValueMap>,
-) -> Result<Vec<MapOutcome>, Error> {
-    let mut outcomes = Vec::new();
-    for patch in patches {
-        match patch {
-            NbtPatch::Set { path, value } => set_at(root, path, Value::from(value.clone()))?,
-            NbtPatch::Remove { path } => {
-                remove_at(root, path)?;
-            }
-            NbtPatch::Rename { path, to } => rename_at(root, path, to)?,
-            NbtPatch::Copy { from, to } => {
-                let value = value_at(root, from)
-                    .cloned()
-                    .ok_or_else(|| Error::MissingPath(from.clone()))?;
-                set_at(root, to, value)?;
-            }
-            NbtPatch::Move { from, to } => {
-                let value = remove_at(root, from)?;
-                set_at(root, to, value)?;
-            }
-            NbtPatch::ConvertNumber { path, to } => {
-                let value = value_at(root, path).ok_or_else(|| Error::MissingPath(path.clone()))?;
-                let converted = convert_number(value, *to)?;
-                set_at(root, path, converted)?;
-            }
-            NbtPatch::MapValue {
-                from,
-                to,
-                using,
-                remove_source,
-            } => {
-                let source = value_at(root, from)
-                    .cloned()
-                    .ok_or_else(|| Error::MissingPath(from.clone()))?;
-                let source_typed = typed_nbt(&source);
-                let value_map = maps.get(using).ok_or_else(|| Error::UnknownValueMap {
-                    rule_id: "<runtime>".into(),
-                    map_id: using.clone(),
-                })?;
-                let entry = value_map
-                    .entries
-                    .iter()
-                    .find(|entry| {
-                        let expected = Value::from(entry.from.clone());
-                        source == expected
-                            || (value_map.coerce_numeric && numeric_equal(&source, &expected))
-                    })
-                    .ok_or_else(|| Error::UnmappedValue {
-                        map_id: using.clone(),
-                        path: from.clone(),
-                        value: source_typed.clone(),
-                    })?;
-                set_at(root, to, Value::from(entry.to.clone()))?;
-                if *remove_source {
-                    remove_at(root, from)?;
-                }
-                outcomes.push(MapOutcome {
-                    map_id: using.clone(),
-                    from: from.clone(),
-                    to: to.clone(),
-                    source: source_typed,
-                    destination: entry.to.clone(),
-                });
-            }
-        }
-    }
-    Ok(outcomes)
-}
-
-fn typed_nbt(value: &Value) -> TypedNbt {
+pub fn typed_nbt(value: &Value) -> TypedNbt {
     match value {
         Value::Byte(v) => TypedNbt::Byte(*v),
         Value::Short(v) => TypedNbt::Short(*v),
@@ -1667,88 +1842,6 @@ fn value_at<'a>(root: &'a Value, path: &NbtPath) -> Option<&'a Value> {
     Some(current)
 }
 
-fn value_at_mut<'a>(root: &'a mut Value, path: &NbtPath) -> Option<&'a mut Value> {
-    let mut current = root;
-    for part in &path.0 {
-        current = match (part, current) {
-            (PathElement::Field(field), Value::Compound(map)) => map.get_mut(field)?,
-            (PathElement::Index(index), Value::List(list)) => list.values.get_mut(*index)?,
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
-fn parent_at_mut<'a>(
-    root: &'a mut Value,
-    path: &NbtPath,
-) -> Result<(&'a mut Value, PathElement), Error> {
-    let (last_part, parents) = path
-        .0
-        .split_last()
-        .ok_or_else(|| Error::MissingPath(path.clone()))?;
-    let mut current = root;
-    for part in parents {
-        current =
-            match (part, current) {
-                (PathElement::Field(field), Value::Compound(map)) => map
-                    .get_mut(field)
-                    .ok_or_else(|| Error::MissingPath(path.clone()))?,
-                (PathElement::Index(index), Value::List(sequence)) => sequence
-                    .values
-                    .get_mut(*index)
-                    .ok_or_else(|| Error::MissingPath(path.clone()))?,
-                _ => return Err(Error::PathType(path.clone())),
-            };
-    }
-    Ok((current, last_part.clone()))
-}
-
-fn set_at(root: &mut Value, path: &NbtPath, value: Value) -> Result<(), Error> {
-    let (parent, last) = parent_at_mut(root, path)?;
-    match (&last, parent) {
-        (PathElement::Field(field), Value::Compound(map)) => {
-            map.insert(field.clone(), value);
-            Ok(())
-        }
-        (PathElement::Index(index), Value::List(sequence))
-            if *index < sequence.values.len() && value.tag() == sequence.element_tag =>
-        {
-            sequence.values[*index] = value;
-            Ok(())
-        }
-        _ => Err(Error::PathType(path.clone())),
-    }
-}
-
-fn remove_at(root: &mut Value, path: &NbtPath) -> Result<Value, Error> {
-    let (parent, last) = parent_at_mut(root, path)?;
-    match (&last, parent) {
-        (PathElement::Field(field), Value::Compound(map)) => map
-            .remove(field)
-            .ok_or_else(|| Error::MissingPath(path.clone())),
-        (PathElement::Index(index), Value::List(sequence)) if *index < sequence.values.len() => {
-            Ok(sequence.values.remove(*index))
-        }
-        _ => Err(Error::PathType(path.clone())),
-    }
-}
-
-fn rename_at(root: &mut Value, path: &NbtPath, to: &str) -> Result<(), Error> {
-    let (parent, last) = parent_at_mut(root, path)?;
-    let PathElement::Field(field) = &last else {
-        return Err(Error::PathType(path.clone()));
-    };
-    let Value::Compound(map) = parent else {
-        return Err(Error::PathType(path.clone()));
-    };
-    let value = map
-        .remove(field)
-        .ok_or_else(|| Error::MissingPath(path.clone()))?;
-    map.insert(to.to_owned(), value);
-    Ok(())
-}
-
 #[allow(clippy::cast_precision_loss)]
 fn as_f64(value: &Value) -> Option<f64> {
     match value {
@@ -1767,7 +1860,7 @@ fn as_f64(value: &Value) -> Option<f64> {
     clippy::float_cmp,
     clippy::manual_range_contains
 )]
-fn numeric_equal(first: &Value, second: &Value) -> bool {
+pub(crate) fn numeric_equal(first: &Value, second: &Value) -> bool {
     fn integer(value: &Value) -> Option<i64> {
         match value {
             Value::Byte(v) => Some(i64::from(*v)),
@@ -1798,726 +1891,5 @@ fn numeric_equal(first: &Value, second: &Value) -> bool {
         }
         (None, None, Some(first), Some(second)) => first == second,
         _ => false,
-    }
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn convert_number(value: &Value, target: NumericType) -> Result<Value, Error> {
-    let display = format!("{value:?}");
-    let integer = match value {
-        Value::Byte(v) => Some(i64::from(*v)),
-        Value::Short(v) => Some(i64::from(*v)),
-        Value::Int(v) => Some(i64::from(*v)),
-        Value::Long(v) => Some(*v),
-        _ => None,
-    };
-    match target {
-        NumericType::Byte => integer.and_then(|v| i8::try_from(v).ok()).map(Value::Byte),
-        NumericType::Short => integer
-            .and_then(|v| i16::try_from(v).ok())
-            .map(Value::Short),
-        NumericType::Int => integer.and_then(|v| i32::try_from(v).ok()).map(Value::Int),
-        NumericType::Long => integer.map(Value::Long),
-        NumericType::Float => as_f64(value)
-            .filter(|v| v.is_finite() && *v >= f64::from(f32::MIN) && *v <= f64::from(f32::MAX))
-            .map(|v| Value::Float(v as f32)),
-        NumericType::Double => as_f64(value).filter(|v| v.is_finite()).map(Value::Double),
-    }
-    .ok_or(Error::NumericOverflow {
-        value: display,
-        target,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_nbt_json_retains_exact_numeric_and_empty_list_types() {
-        let json = r#"{"type":"list","value":{"element_type":"byte","values":[]}}"#;
-        let value: TypedNbt = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            Value::from(value),
-            Value::List(List {
-                element_tag: Tag::Byte,
-                values: vec![]
-            })
-        );
-        let byte: TypedNbt = serde_json::from_str(r#"{"type":"byte","value":1}"#).unwrap();
-        assert_eq!(Value::from(byte), Value::Byte(1));
-    }
-
-    #[test]
-    fn numeric_predicates_cover_all_modes() {
-        assert!(NumericPredicate::Any.matches(7));
-        assert!(NumericPredicate::Exact { value: 7 }.matches(7));
-        assert!(NumericPredicate::Masked {
-            mask: 0b11,
-            value: 0b10
-        }
-        .matches(6));
-        assert!(NumericPredicate::Range { min: 3, max: 7 }.matches(5));
-        assert!(!NumericPredicate::Range { min: 3, max: 7 }.matches(8));
-    }
-
-    #[test]
-    fn rejects_unknown_schema_and_duplicate_rules() {
-        let document = RuleDocument {
-            schema_version: 4,
-            rule_set: "test".into(),
-            source_profile: None,
-            imports: vec![],
-            value_maps: vec![],
-            standalone_inventories: vec![],
-            rules: vec![],
-            source_manifest: vec![],
-            target_manifest: vec![],
-        };
-        assert!(matches!(
-            validate_loaded(vec![(PathBuf::from("x"), document)]),
-            Err(Error::Schema { actual: 4 })
-        ));
-    }
-
-    #[test]
-    fn schema_two_parses_explicit_profiles_and_rejects_unknown_fields_and_values() {
-        let document: RuleDocument = serde_json::from_str(
-            r#"{"schema_version":2,"rule_set":"pack","source_profile":"forge-1.2.5"}"#,
-        )
-        .unwrap();
-        assert_eq!(document.source_profile, Some(SourceProfile::Forge1_2_5));
-        assert!(serde_json::from_str::<RuleDocument>(
-            r#"{"schema_version":2,"rule_set":"pack","source_profile":"forge-9.9.9"}"#
-        )
-        .is_err());
-        assert!(serde_json::from_str::<RuleDocument>(
-            r#"{"schema_version":2,"rule_set":"pack","surprise":true}"#
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn documented_rule_example_parses() {
-        let document: RuleDocument =
-            serde_json::from_str(include_str!("../../../examples/rules/example.json")).unwrap();
-        assert_eq!(document.schema_version, 3);
-        assert_eq!(document.source_profile, Some(SourceProfile::Forge1_7_10));
-    }
-
-    #[test]
-    fn source_profile_resolution_handles_neutral_imports_legacy_and_conflicts() {
-        let document = |path: &str, version, profile| {
-            (
-                PathBuf::from(path),
-                RuleDocument {
-                    schema_version: version,
-                    rule_set: path.into(),
-                    source_profile: profile,
-                    imports: vec![],
-                    value_maps: vec![],
-                    standalone_inventories: vec![],
-                    rules: vec![],
-                    source_manifest: vec![],
-                    target_manifest: vec![],
-                },
-            )
-        };
-        let loaded = validate_loaded(vec![
-            document("library", 2, None),
-            document("entry", 2, Some(SourceProfile::Forge1_2_5)),
-        ])
-        .unwrap();
-        assert_eq!(loaded.source_profile, SourceProfile::Forge1_2_5);
-        assert_eq!(
-            validate_loaded(vec![document("legacy", 1, None)])
-                .unwrap()
-                .source_profile,
-            SourceProfile::Forge1_7_10
-        );
-        assert!(matches!(
-            validate_loaded(vec![document("neutral", 2, None)]),
-            Err(Error::MissingSourceProfile)
-        ));
-        let error = validate_loaded(vec![
-            document("a", 2, Some(SourceProfile::Forge1_2_5)),
-            document("b", 1, None),
-        ])
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "conflicting source profiles in rule graph: a=forge-1.2.5, b=forge-1.7.10"
-        );
-    }
-
-    #[test]
-    fn standalone_inventory_paths_default_validate_and_aggregate_canonically() {
-        let legacy: RuleDocument =
-            serde_json::from_str(r#"{"schema_version":1,"rule_set":"legacy"}"#).unwrap();
-        assert!(legacy.standalone_inventories.is_empty());
-        let field = NbtPath(vec![
-            PathElement::Field("Inventory".into()),
-            PathElement::Field("Items".into()),
-        ]);
-        let indexed = NbtPath(vec![
-            PathElement::Field("Containers".into()),
-            PathElement::Index(0),
-        ]);
-        let document = |name: &str, paths: Vec<NbtPath>| RuleDocument {
-            schema_version: 1,
-            rule_set: name.into(),
-            source_profile: None,
-            imports: vec![],
-            value_maps: vec![],
-            standalone_inventories: paths,
-            rules: vec![],
-            source_manifest: vec![],
-            target_manifest: vec![],
-        };
-        let loaded = validate_loaded(vec![
-            (
-                PathBuf::from("imported"),
-                document("imported", vec![field.clone()]),
-            ),
-            (
-                PathBuf::from("local"),
-                document("local", vec![indexed.clone(), field.clone()]),
-            ),
-        ])
-        .unwrap();
-        let mut expected = vec![field, indexed];
-        expected.sort();
-        assert_eq!(loaded.standalone_inventories, expected);
-        assert!(matches!(
-            validate_loaded(vec![(
-                PathBuf::from("bad"),
-                document("bad", vec![NbtPath(vec![])])
-            )]),
-            Err(Error::EmptyStandaloneInventoryPath)
-        ));
-    }
-
-    #[test]
-    fn predicates_are_type_sensitive_and_patches_preserve_unknown_data() {
-        let mut root = Value::Compound(BTreeMap::from([
-            ("flag".into(), Value::Int(1)),
-            ("count".into(), Value::Long(127)),
-            ("unknown".into(), Value::ByteArray(vec![1, 2, 3])),
-        ]));
-        assert!(!predicate_matches(
-            &root,
-            &NbtPredicate::Equals {
-                path: NbtPath(vec![PathElement::Field("flag".into())]),
-                value: TypedNbt::Byte(1),
-                coerce_numeric: false
-            }
-        ));
-        assert!(predicate_matches(
-            &root,
-            &NbtPredicate::Equals {
-                path: NbtPath(vec![PathElement::Field("flag".into())]),
-                value: TypedNbt::Byte(1),
-                coerce_numeric: true
-            }
-        ));
-        apply_patches(
-            &mut root,
-            &[
-                NbtPatch::Rename {
-                    path: NbtPath(vec![PathElement::Field("flag".into())]),
-                    to: "renamed".into(),
-                },
-                NbtPatch::ConvertNumber {
-                    path: NbtPath(vec![PathElement::Field("count".into())]),
-                    to: NumericType::Byte,
-                },
-                NbtPatch::Set {
-                    path: NbtPath(vec![PathElement::Field("new".into())]),
-                    value: TypedNbt::Short(4),
-                },
-            ],
-        )
-        .unwrap();
-        let Value::Compound(map) = root else { panic!() };
-        assert_eq!(map.get("renamed"), Some(&Value::Int(1)));
-        assert_eq!(map.get("count"), Some(&Value::Byte(127)));
-        assert_eq!(map.get("unknown"), Some(&Value::ByteArray(vec![1, 2, 3])));
-    }
-
-    #[test]
-    fn checked_numeric_conversion_rejects_overflow() {
-        let mut root = Value::Compound(BTreeMap::from([("value".into(), Value::Int(128))]));
-        let error = apply_patches(
-            &mut root,
-            &[NbtPatch::ConvertNumber {
-                path: NbtPath(vec![PathElement::Field("value".into())]),
-                to: NumericType::Byte,
-            }],
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::NumericOverflow {
-                target: NumericType::Byte,
-                ..
-            }
-        ));
-        assert_eq!(
-            value_at(&root, &NbtPath(vec![PathElement::Field("value".into())])),
-            Some(&Value::Int(128))
-        );
-    }
-
-    #[test]
-    fn manifest_conflicts_require_and_honor_explicit_selection() {
-        let mut catalog = RegistryCatalog::default();
-        catalog
-            .insert(RegistryEntry {
-                kind: RegistryKind::Block,
-                name: RegistryName::parse("mod:old").unwrap(),
-                numeric_id: 20,
-                provenance: Provenance::world("world", "fixture"),
-            })
-            .unwrap();
-        let replacement = ManifestEntry {
-            kind: ManifestKind::Block,
-            name: "mod:new".into(),
-            numeric_id: 20,
-            conflict: None,
-        };
-        assert!(matches!(
-            apply_manifest(&mut catalog, std::slice::from_ref(&replacement), "rules"),
-            Err(Error::ManifestConflict { .. })
-        ));
-        let explicit = ManifestEntry {
-            conflict: Some(ConflictSelection::Manifest),
-            ..replacement
-        };
-        apply_manifest(&mut catalog, &[explicit], "rules").unwrap();
-        assert_eq!(
-            catalog
-                .by_numeric(&RegistryKind::Block, 20)
-                .unwrap()
-                .name
-                .as_str(),
-            "mod:new"
-        );
-    }
-
-    #[test]
-    fn manifest_cannot_override_forge_1_2_5_vanilla_but_can_repeat_it() {
-        let mut catalog = RegistryCatalog::forge_1_2_5();
-        let repeat = ManifestEntry {
-            kind: ManifestKind::Block,
-            name: "minecraft:stone".into(),
-            numeric_id: 1,
-            conflict: None,
-        };
-        apply_manifest(&mut catalog, &[repeat], "rules").unwrap();
-        let contradiction = ManifestEntry {
-            kind: ManifestKind::Block,
-            name: "mod:replacement".into(),
-            numeric_id: 1,
-            conflict: Some(ConflictSelection::Manifest),
-        };
-        assert!(matches!(
-            apply_manifest(&mut catalog, &[contradiction], "rules"),
-            Err(Error::AuthoritativeManifestConflict { .. })
-        ));
-    }
-
-    #[test]
-    fn deterministic_priority_terminal_semantics_produce_trace() {
-        let matcher = BlockMatcher {
-            identity: IdentityMatcher::Name {
-                name: "mod:block".into(),
-            },
-            metadata: NumericPredicate::Any,
-            nbt: vec![],
-            block_entity: None,
-        };
-        let low = Rule {
-            id: "low".into(),
-            priority: 1,
-            terminal: false,
-            body: RuleBody::Block {
-                matcher: matcher.clone(),
-                action: ObjectAction::DiscardNbt,
-            },
-        };
-        let high = Rule {
-            id: "high".into(),
-            priority: 10,
-            terminal: true,
-            body: RuleBody::Block {
-                matcher,
-                action: ObjectAction::Delete,
-            },
-        };
-        let loaded = validate_loaded(vec![(
-            PathBuf::from("rules"),
-            RuleDocument {
-                schema_version: 1,
-                rule_set: "set".into(),
-                source_profile: None,
-                imports: vec![],
-                value_maps: vec![],
-                standalone_inventories: vec![],
-                rules: vec![low, high],
-                source_manifest: vec![],
-                target_manifest: vec![],
-            },
-        )])
-        .unwrap();
-        TRACE_CONSTRUCTIONS.with(|count| count.set(0));
-        let execution = evaluate_block_for_execution(
-            &loaded,
-            &RegistryKind::Block,
-            &RegistryName::parse("mod:block").unwrap(),
-            20,
-            0,
-            None,
-        );
-        assert_eq!(execution.actions.len(), 1);
-        assert_eq!(execution.actions[0].rule_id, "high");
-        assert_eq!(TRACE_CONSTRUCTIONS.with(std::cell::Cell::get), 0);
-        let decision = evaluate_block(
-            &loaded,
-            &RegistryKind::Block,
-            &RegistryName::parse("mod:block").unwrap(),
-            20,
-            0,
-            None,
-        );
-        assert_eq!(
-            decision.actions,
-            vec![("high".into(), ObjectAction::Delete)]
-        );
-        assert_eq!(decision.trace.len(), 1);
-        assert_eq!(TRACE_CONSTRUCTIONS.with(std::cell::Cell::get), 1);
-    }
-
-    #[test]
-    fn entity_and_colocated_block_entity_decisions_are_coordinated() {
-        let documents = vec![(
-            PathBuf::from("rules"),
-            RuleDocument {
-                schema_version: 1,
-                rule_set: "entities".into(),
-                source_profile: None,
-                imports: vec![],
-                value_maps: vec![],
-                standalone_inventories: vec![],
-                rules: vec![
-                    Rule {
-                        id: "machine-pair".into(),
-                        priority: 10,
-                        terminal: true,
-                        body: RuleBody::Block {
-                            matcher: BlockMatcher {
-                                identity: IdentityMatcher::Name {
-                                    name: "mod:machine".into(),
-                                },
-                                metadata: NumericPredicate::Any,
-                                nbt: vec![],
-                                block_entity: Some(NamedMatcher {
-                                    name: "mod:machine_tile".into(),
-                                    nbt: vec![],
-                                }),
-                            },
-                            action: ObjectAction::Substitute {
-                                target: "mod:new_machine".into(),
-                            },
-                        },
-                    },
-                    Rule {
-                        id: "machine-tile".into(),
-                        priority: 10,
-                        terminal: true,
-                        body: RuleBody::BlockEntity {
-                            matcher: NamedMatcher {
-                                name: "mod:machine_tile".into(),
-                                nbt: vec![],
-                            },
-                            action: ObjectAction::Transform {
-                                target: Some("mod:new_machine_tile".into()),
-                                numeric: None,
-                                patches: vec![],
-                                nested_items: vec![],
-                            },
-                        },
-                    },
-                    Rule {
-                        id: "rename-entity".into(),
-                        priority: 1,
-                        terminal: true,
-                        body: RuleBody::Entity {
-                            matcher: NamedMatcher {
-                                name: "mod:old_entity".into(),
-                                nbt: vec![],
-                            },
-                            action: ObjectAction::Transform {
-                                target: Some("mod:new_entity".into()),
-                                numeric: None,
-                                patches: vec![],
-                                nested_items: vec![],
-                            },
-                        },
-                    },
-                ],
-                source_manifest: vec![],
-                target_manifest: vec![],
-            },
-        )];
-        let loaded = validate_loaded(documents).unwrap();
-        let nbt = Value::Compound(BTreeMap::new());
-        let coordinated = evaluate_coordinated_block(
-            &loaded,
-            &RegistryKind::Block,
-            &RegistryName::parse("mod:machine").unwrap(),
-            900,
-            0,
-            None,
-            Some(("mod:machine_tile", &nbt)),
-        );
-        assert_eq!(coordinated.block.actions[0].0, "machine-pair");
-        assert_eq!(
-            coordinated.block_entity.unwrap().actions[0].0,
-            "machine-tile"
-        );
-        assert_eq!(
-            evaluate_entity(&loaded, "mod:old_entity", &nbt).actions[0].0,
-            "rename-entity"
-        );
-    }
-
-    fn nested_decision(rule_id: &str, path: &str) -> Decision {
-        Decision {
-            actions: vec![(
-                rule_id.into(),
-                ObjectAction::Transform {
-                    target: None,
-                    numeric: None,
-                    patches: vec![],
-                    nested_items: vec![NbtPath(vec![PathElement::Field(path.into())])],
-                },
-            )],
-            trace: vec![],
-        }
-    }
-
-    #[test]
-    fn declared_nested_items_use_normal_pipeline_and_obey_limits() {
-        let item = || Value::Compound(BTreeMap::from([("id".into(), Value::String("x".into()))]));
-        let mut root = Value::Compound(BTreeMap::from([(
-            "Items".into(),
-            Value::List(List {
-                element_tag: Tag::Compound,
-                values: vec![item(), item()],
-            }),
-        )]));
-        let mut visited = 0;
-        let count = process_declared_nested_items(
-            &mut root,
-            &nested_decision("backpack", "Items"),
-            NestedLimits {
-                max_depth: 2,
-                max_objects: 2,
-            },
-            |_| {
-                visited += 1;
-                Decision {
-                    actions: vec![],
-                    trace: vec![],
-                }
-            },
-        )
-        .unwrap();
-        assert_eq!((count, visited), (2, 2));
-
-        let error = process_declared_nested_items(
-            &mut root,
-            &nested_decision("backpack", "Items"),
-            NestedLimits {
-                max_depth: 2,
-                max_objects: 1,
-            },
-            |_| Decision {
-                actions: vec![],
-                trace: vec![],
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(error, Error::NestedCount { limit: 1, .. }));
-    }
-
-    #[test]
-    fn nested_rule_invocation_cycles_report_the_chain() {
-        let mut root = Value::Compound(BTreeMap::from([(
-            "Item".into(),
-            Value::Compound(BTreeMap::from([(
-                "Item".into(),
-                Value::Compound(BTreeMap::new()),
-            )])),
-        )]));
-        let error = process_declared_nested_items(
-            &mut root,
-            &nested_decision("recursive", "Item"),
-            NestedLimits {
-                max_depth: 8,
-                max_objects: 8,
-            },
-            |_| nested_decision("recursive", "Item"),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "nested item rule invocation cycle: [\"recursive\", \"recursive\"]"
-        );
-    }
-
-    #[test]
-    fn value_map_lookup_is_typed_and_numeric_coercion_is_exact() {
-        let map = ValueMap {
-            id: "test:numbers".into(),
-            coerce_numeric: true,
-            entries: vec![
-                ValueMapEntry {
-                    from: TypedNbt::Long(i64::MAX),
-                    to: TypedNbt::String("max".into()),
-                },
-                ValueMapEntry {
-                    from: TypedNbt::Int(1),
-                    to: TypedNbt::Byte(7),
-                },
-            ],
-        };
-        let maps = BTreeMap::from([(map.id.clone(), map)]);
-        let patch = NbtPatch::MapValue {
-            from: NbtPath(vec![PathElement::Field("old".into())]),
-            to: NbtPath(vec![PathElement::Field("new".into())]),
-            using: "test:numbers".into(),
-            remove_source: true,
-        };
-        for source in [
-            Value::Byte(1),
-            Value::Short(1),
-            Value::Int(1),
-            Value::Long(1),
-            Value::Float(1.0),
-            Value::Double(1.0),
-        ] {
-            let mut root = Value::Compound(BTreeMap::from([("old".into(), source)]));
-            let outcomes =
-                apply_patches_with_maps(&mut root, std::slice::from_ref(&patch), &maps).unwrap();
-            let Value::Compound(root) = root else {
-                unreachable!()
-            };
-            assert_eq!(root.get("new"), Some(&Value::Byte(7)));
-            assert!(!root.contains_key("old"));
-            assert_eq!(outcomes[0].destination, TypedNbt::Byte(7));
-        }
-        assert!(!numeric_equal(
-            &Value::Long(i64::MAX),
-            &Value::Double(9_223_372_036_854_775_808.0)
-        ));
-        assert!(!numeric_equal(&Value::String("1".into()), &Value::Int(1)));
-    }
-
-    #[test]
-    fn value_map_failures_are_contextual_and_write_precedes_removal() {
-        let map = ValueMap {
-            id: "test:map".into(),
-            coerce_numeric: false,
-            entries: vec![ValueMapEntry {
-                from: TypedNbt::Byte(1),
-                to: TypedNbt::String("UP".into()),
-            }],
-        };
-        let maps = BTreeMap::from([(map.id.clone(), map)]);
-        let mut root = Value::Compound(BTreeMap::from([
-            ("old".into(), Value::Byte(1)),
-            ("parent".into(), Value::Byte(0)),
-        ]));
-        let error = apply_patches_with_maps(
-            &mut root,
-            &[NbtPatch::MapValue {
-                from: NbtPath(vec![PathElement::Field("old".into())]),
-                to: NbtPath(vec![
-                    PathElement::Field("parent".into()),
-                    PathElement::Field("new".into()),
-                ]),
-                using: "test:map".into(),
-                remove_source: true,
-            }],
-            &maps,
-        )
-        .unwrap_err();
-        assert!(matches!(error, Error::PathType(_)));
-        assert_eq!(
-            value_at(&root, &NbtPath(vec![PathElement::Field("old".into())])),
-            Some(&Value::Byte(1))
-        );
-
-        let mut unmapped = Value::Compound(BTreeMap::from([("old".into(), Value::Int(1))]));
-        let error = apply_patches_with_maps(
-            &mut unmapped,
-            &[NbtPatch::MapValue {
-                from: NbtPath(vec![PathElement::Field("old".into())]),
-                to: NbtPath(vec![PathElement::Field("new".into())]),
-                using: "test:map".into(),
-                remove_source: false,
-            }],
-            &maps,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::UnmappedValue {
-                value: TypedNbt::Int(1),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn coercing_maps_reject_duplicate_and_ambiguous_entries() {
-        let path = Path::new("maps.json");
-        let duplicate = ValueMap {
-            id: "test:map".into(),
-            coerce_numeric: false,
-            entries: vec![
-                ValueMapEntry {
-                    from: TypedNbt::Byte(1),
-                    to: TypedNbt::Byte(2),
-                },
-                ValueMapEntry {
-                    from: TypedNbt::Byte(1),
-                    to: TypedNbt::Byte(3),
-                },
-            ],
-        };
-        assert!(matches!(
-            validate_value_map(&duplicate, path),
-            Err(Error::DuplicateValueMapEntry { .. })
-        ));
-        let ambiguous = ValueMap {
-            id: "test:map".into(),
-            coerce_numeric: true,
-            entries: vec![
-                ValueMapEntry {
-                    from: TypedNbt::Byte(1),
-                    to: TypedNbt::Byte(2),
-                },
-                ValueMapEntry {
-                    from: TypedNbt::Int(1),
-                    to: TypedNbt::Byte(3),
-                },
-            ],
-        };
-        assert!(matches!(
-            validate_value_map(&ambiguous, path),
-            Err(Error::AmbiguousValueMapEntry { .. })
-        ));
     }
 }

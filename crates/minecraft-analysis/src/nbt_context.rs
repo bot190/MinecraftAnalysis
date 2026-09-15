@@ -239,8 +239,8 @@ mod tests {
             nbt::encode(&level_document(), nbt::Compression::Gzip).unwrap(),
         )
         .unwrap();
-        let rules = temp.path().join("rules.json");
-        fs::write(&rules, r#"{"schema_version":2,"rule_set":"viewer","source_profile":"forge-1.7.10","source_manifest":[{"kind":"block","name":"mod:machine","numeric_id":300}]}"#).unwrap();
+        let rules = temp.path().join("rules.yaml");
+        fs::write(&rules, r#"{"schema_version":1,"rule_set":"viewer","source_profile":"forge-1.7.10","source_manifest":[{"kind":"block","name":"mod:machine","numeric_id":300}]}"#).unwrap();
         let context = load(&region, &[rules]).unwrap();
         assert_eq!(
             context
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn invalid_explicit_rules_fail_before_viewer_context_is_ready() {
         let temp = tempdir().unwrap();
-        let rules = temp.path().join("bad.json");
+        let rules = temp.path().join("bad.yaml");
         fs::write(&rules, "not json").unwrap();
         assert!(load(&temp.path().join("region/r.0.0.mca"), &[rules]).is_err());
     }
@@ -303,10 +303,10 @@ mod tests {
             nbt::encode(&level, nbt::Compression::Gzip).unwrap(),
         )
         .unwrap();
-        let rules = temp.path().join("rules.json");
+        let rules = temp.path().join("rules.yaml");
         fs::write(
             &rules,
-            r#"{"schema_version":2,"rule_set":"viewer","source_profile":"forge-1.7.10"}"#,
+            r#"{"schema_version":1,"rule_set":"viewer","source_profile":"forge-1.7.10"}"#,
         )
         .unwrap();
         let error = load(&region, &[rules]).unwrap_err().to_string();

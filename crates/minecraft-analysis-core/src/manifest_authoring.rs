@@ -56,10 +56,10 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("invalid JSON rule document {path}: {source}")]
-    Json {
+    #[error("invalid YAML rule document {path}: {source}")]
+    Yaml {
         path: PathBuf,
-        source: serde_json::Error,
+        source: serde_yaml::Error,
     },
     #[error("ID-map parsing is not supported for {0}")]
     UnsupportedProfile(&'static str),
@@ -83,7 +83,7 @@ pub enum Error {
         source: std::io::Error,
     },
     #[error("cannot serialize updated rule document: {0}")]
-    Serialize(serde_json::Error),
+    Serialize(serde_yaml::Error),
     #[error("updated rule graph is invalid: {0}")]
     Validate(rules::Error),
     #[error("cannot atomically replace rule document {path}: {source}")]
@@ -121,7 +121,7 @@ pub fn update_manifest(
         source,
     })?;
     let mut document: RuleDocument =
-        serde_json::from_slice(&bytes).map_err(|source| Error::Json {
+        serde_yaml::from_slice(&bytes).map_err(|source| Error::Yaml {
             path: rule_path.to_owned(),
             source,
         })?;
@@ -333,17 +333,13 @@ fn install_candidate(rule_path: &Path, document: &RuleDocument) -> Result<(), Er
     let parent = rule_path.parent().unwrap_or_else(|| Path::new("."));
     let mut temporary = tempfile::Builder::new()
         .prefix(".minecraft-analysis-rules-")
-        .suffix(".json")
+        .suffix(".yaml")
         .tempfile_in(parent)
         .map_err(|source| Error::CreateTemp {
             path: rule_path.to_owned(),
             source,
         })?;
-    serde_json::to_writer_pretty(&mut temporary, document).map_err(Error::Serialize)?;
-    writeln!(temporary).map_err(|source| Error::WriteTemp {
-        path: rule_path.to_owned(),
-        source,
-    })?;
+    serde_yaml::to_writer(&mut temporary, document).map_err(Error::Serialize)?;
     temporary.flush().map_err(|source| Error::WriteTemp {
         path: rule_path.to_owned(),
         source,
@@ -482,10 +478,10 @@ mod tests {
     #[test]
     fn failed_update_preserves_original_rule_bytes() {
         let root = tempfile::tempdir().unwrap();
-        let rules = root.path().join("rules.json");
+        let rules = root.path().join("rules.yaml");
         let id_map = root.path().join("idmap.txt");
         let original = br#"{
-  "schema_version": 2,
+  "schema_version": 1,
   "rule_set": "test",
   "source_profile": "forge-1.2.5",
   "rules": []
@@ -503,10 +499,10 @@ mod tests {
     #[test]
     fn validation_and_installation_failures_do_not_replace_destination() {
         let root = tempfile::tempdir().unwrap();
-        let rules = root.path().join("rules.json");
-        let original = br#"{"schema_version":2,"rule_set":"valid","source_profile":"forge-1.2.5"}"#;
+        let rules = root.path().join("rules.yaml");
+        let original = br#"{"schema_version":1,"rule_set":"valid","source_profile":"forge-1.2.5"}"#;
         fs::write(&rules, original).unwrap();
-        let invalid: RuleDocument = serde_json::from_str(
+        let invalid: RuleDocument = serde_yaml::from_str(
             r#"{"schema_version":99,"rule_set":"invalid","source_profile":"forge-1.2.5"}"#,
         )
         .unwrap();
@@ -519,7 +515,7 @@ mod tests {
         let destination_directory = root.path().join("destination-directory");
         fs::create_dir(&destination_directory).unwrap();
         fs::write(destination_directory.join("marker"), b"kept").unwrap();
-        let valid: RuleDocument = serde_json::from_slice(original).unwrap();
+        let valid: RuleDocument = serde_yaml::from_slice(original).unwrap();
         assert!(matches!(
             install_candidate(&destination_directory, &valid),
             Err(Error::Replace { .. })
