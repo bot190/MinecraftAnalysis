@@ -1,4 +1,12 @@
 //! Renderer-independent progress observations for long-running world work.
+//!
+//! Region identity is the phase plus world-relative path. `RegionPrepared`
+//! establishes the header total, `RegionChunkCompleted` carries a cumulative
+//! successful count, and `RegionWriting` / `RegionFinishing` describe work
+//! remaining after chunks. `RegionFailed` and `RegionCompleted` carry terminal
+//! counts; only the latter advances aggregate success. Observers matching this
+//! enum exhaustively must handle these detail variants. Compatibility entry
+//! points continue to use `NoProgress`.
 
 use crate::work::WorkPhase;
 
@@ -21,9 +29,38 @@ pub enum ProgressEvent {
         phase: WorkPhase,
         path: String,
     },
+    /// The region header has been read and established its populated chunk total.
+    RegionPrepared {
+        phase: WorkPhase,
+        path: String,
+        total_chunks: u16,
+    },
+    /// A chunk was successfully consumed or encoded into its output region.
+    RegionChunkCompleted {
+        phase: WorkPhase,
+        path: String,
+        completed_chunks: u16,
+    },
+    /// Chunk processing is done and the region result awaits its completion boundary.
+    RegionFinishing {
+        phase: WorkPhase,
+        path: String,
+    },
+    /// Conversion is finalizing its container or writing its temporary file.
+    RegionWriting {
+        phase: WorkPhase,
+        path: String,
+    },
+    /// Region work failed without becoming aggregate progress.
+    RegionFailed {
+        phase: WorkPhase,
+        path: String,
+        completed_chunks: u16,
+    },
     RegionCompleted {
         phase: WorkPhase,
         path: String,
+        completed_chunks: u16,
     },
     PhaseCompleted {
         phase: WorkPhase,

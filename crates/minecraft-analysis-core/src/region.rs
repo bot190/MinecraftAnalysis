@@ -275,6 +275,22 @@ impl<'a> RegionReader<'a> {
         })
     }
 
+    /// Count populated chunk slots from the location table in the region header.
+    ///
+    /// This only inspects the header.  A malformed nonzero location is counted
+    /// here and remains an error when its chunk is subsequently read, preserving
+    /// the normal read error selection.
+    #[must_use]
+    pub fn populated_chunk_count(&self) -> u16 {
+        let mut count = 0_u16;
+        for location in self.bytes[..SECTOR_SIZE].chunks_exact(4) {
+            if location != [0, 0, 0, 0] {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Read and decompress one local chunk coordinate.
     ///
     /// # Errors
@@ -589,6 +605,7 @@ mod tests {
         let reader = RegionReader::new(&bytes, DEFAULT_MAX_CHUNK_BYTES).unwrap();
         assert_eq!(reader.read_chunk(4, 7).unwrap(), None);
         assert_eq!(reader.timestamp(4, 7).unwrap(), 0);
+        assert_eq!(reader.populated_chunk_count(), 0);
     }
 
     #[test]
@@ -604,6 +621,17 @@ mod tests {
             Some(b"chunk nbt".to_vec())
         );
         assert_eq!(reader.timestamp(31, 12).unwrap(), 1_700_000_000);
+        assert_eq!(reader.populated_chunk_count(), 1);
+    }
+
+    #[test]
+    fn populated_chunk_count_ignores_sparse_empty_slots() {
+        let mut writer = RegionWriter::new().unwrap();
+        writer.write_chunk(1, 2, b"first", 0).unwrap();
+        writer.write_chunk(30, 29, b"second", 0).unwrap();
+        let bytes = writer.finish().unwrap();
+        let reader = RegionReader::new(&bytes, DEFAULT_MAX_CHUNK_BYTES).unwrap();
+        assert_eq!(reader.populated_chunk_count(), 2);
     }
 
     #[test]
@@ -635,6 +663,20 @@ mod tests {
             reader.read_chunk(0, 0),
             Err(Error::InvalidLocation { .. })
         ));
+        assert_eq!(reader.populated_chunk_count(), 1);
+    }
+
+    #[test]
+    fn populated_chunk_count_includes_every_header_slot() {
+        let mut writer = RegionWriter::new().unwrap();
+        for z in 0..REGION_WIDTH {
+            for x in 0..REGION_WIDTH {
+                writer.write_chunk(x, z, b"chunk", 0).unwrap();
+            }
+        }
+        let bytes = writer.finish().unwrap();
+        let reader = RegionReader::new(&bytes, DEFAULT_MAX_CHUNK_BYTES).unwrap();
+        assert_eq!(reader.populated_chunk_count(), 1024);
     }
 
     #[test]

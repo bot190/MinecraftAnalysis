@@ -1474,3 +1474,118 @@ fn template_limit_failure_is_contextual_and_leaves_output_unpublished() {
         "{diagnostic}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn graphical_progress_preserves_cli_results_across_workers_and_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let template = root.path().join("template");
+    empty_profile_world(&source, false);
+    empty_profile_world(&template, true);
+    let rules = root.path().join("empty.yaml");
+    fs::write(
+        &rules,
+        "schema_version: 1\nrule_set: empty\nsource_profile: forge-1.7.10\nrules: []\n",
+    )
+    .unwrap();
+    let paths = [
+        "region/r.0.0.mca",
+        "DIM7/region/r.0.0.mca",
+        "DIM-1/region/r.0.0.mca",
+    ];
+    for (index, path) in paths.iter().enumerate() {
+        fs::create_dir_all(source.join(path).parent().unwrap()).unwrap();
+        let mut writer = RegionWriter::new().unwrap();
+        if index < 2 {
+            for x in 0..8 {
+                let chunk = Document {
+                    root_name: String::new(),
+                    root: BTreeMap::from([
+                        ("xPos".into(), Value::Int(x)),
+                        ("zPos".into(), Value::Int(0)),
+                    ]),
+                };
+                writer
+                    .write_chunk(
+                        usize::try_from(x).unwrap(),
+                        0,
+                        &nbt::encode_uncompressed(&chunk).unwrap(),
+                        42,
+                    )
+                    .unwrap();
+            }
+        }
+        fs::write(source.join(path), writer.finish().unwrap()).unwrap();
+    }
+    let executable = env!("CARGO_BIN_EXE_minecraft-analysis");
+    let mut baseline_report = None;
+    let mut baseline_regions = None;
+    for jobs in [1, 3] {
+        for quiet in [false, true] {
+            let flag = if quiet { "--no-progress" } else { "" };
+            let report = root.path().join(format!("report-{jobs}-{quiet}.json"));
+            let output = root.path().join(format!("output-{jobs}-{quiet}"));
+            let coverage = format!(
+                "stty cols 100 rows 16; '{executable}' --jobs {jobs} {flag} rules coverage --world '{}' --rules '{}' --report '{}'",
+                source.display(), rules.display(), report.display());
+            let result = Command::new("script")
+                .args(["-qec", &coverage, "/dev/null"])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            let json: serde_json::Value =
+                serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+            if let Some(baseline) = &baseline_report {
+                assert_eq!(&json, baseline);
+            } else {
+                baseline_report = Some(json);
+            }
+            let convert = format!(
+                "stty cols 100 rows 16; '{executable}' --jobs {jobs} {flag} convert --source '{}' --template '{}' --rules '{}' --output '{}'",
+                source.display(), template.display(), rules.display(), output.display());
+            let result = Command::new("script")
+                .args(["-qec", &convert, "/dev/null"])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            let regions = paths
+                .iter()
+                .map(|path| fs::read(output.join(path)).unwrap())
+                .collect::<Vec<_>>();
+            if let Some(baseline) = &baseline_regions {
+                assert_eq!(&regions, baseline);
+            } else {
+                baseline_regions = Some(regions);
+            }
+            if quiet {
+                assert!(!String::from_utf8_lossy(&result.stdout).contains("chunks"));
+            }
+        }
+    }
+    fs::write(source.join(paths[0]), b"truncated").unwrap();
+    for jobs in [1, 3] {
+        for quiet in [false, true] {
+            let flag = if quiet { "--no-progress" } else { "" };
+            let output = root.path().join(format!("failed-{jobs}-{quiet}"));
+            let command = format!(
+                "stty cols 100 rows 16; '{executable}' --jobs {jobs} {flag} convert --source '{}' --template '{}' --rules '{}' --output '{}'",
+                source.display(), template.display(), rules.display(), output.display());
+            let result = Command::new("script")
+                .args(["-qec", &command, "/dev/null"])
+                .output()
+                .unwrap();
+            assert_eq!(result.status.code(), Some(2));
+            assert!(!output.exists());
+        }
+    }
+}
