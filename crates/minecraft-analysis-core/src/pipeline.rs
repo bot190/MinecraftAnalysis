@@ -156,6 +156,7 @@ fn stage_source(
         target: Option<PathBuf>,
         relative_path: String,
         is_region: bool,
+        completed_chunks: u16,
     }
     let mut iterator_failed = false;
     let work = std::iter::from_fn(|| {
@@ -208,6 +209,7 @@ fn stage_source(
                         target: None,
                         relative_path: entry.relative_path,
                         is_region: false,
+                        completed_chunks: 0,
                     },
                 )));
             }
@@ -258,6 +260,7 @@ fn stage_source(
                     target: Some(target),
                     relative_path: entry.relative_path,
                     is_region,
+                    completed_chunks: 0,
                 },
             )));
         }
@@ -266,7 +269,7 @@ fn stage_source(
     let parallel = crate::work::execute_parallel_with_completion(
         work,
         execution,
-        &|_key, unit: StageUnit| {
+        &|_key, mut unit: StageUnit| {
             if unit.is_region {
                 progress.observe(crate::progress::ProgressEvent::RegionStarted {
                     phase: crate::work::WorkPhase::Staging,
@@ -280,9 +283,10 @@ fn stage_source(
                     source_catalog,
                     target_catalog,
                     rules,
+                    progress,
                 );
                 match result {
-                    Ok(()) => (),
+                    Ok(completed_chunks) => unit.completed_chunks = completed_chunks,
                     Err(error) => {
                         if let Some(temporary) = &unit.temporary {
                             let _ = fs::remove_file(temporary);
@@ -298,6 +302,7 @@ fn stage_source(
                 progress.observe(crate::progress::ProgressEvent::RegionCompleted {
                     phase: crate::work::WorkPhase::Staging,
                     path: unit.relative_path.clone(),
+                    completed_chunks: unit.completed_chunks,
                 });
             }
             Ok(())

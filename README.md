@@ -245,6 +245,27 @@ buffers plus one decoded chunk. Lower `--jobs` values reduce peak memory and may
 also perform better on storage that handles concurrent reads poorly; higher
 values do not guarantee linear speedup.
 
+### Interactive progress
+
+When standard error is an interactive terminal, region-based analysis and
+conversion show their aggregate region bar together with graphical chunk bars for
+active regions. Each bar labels the world-relative path, so regions with the same
+filename in different dimension directories remain distinct. Its `done/total`
+count is populated region-header slots; its graphical fill advances in proportion
+to successful chunk analysis or encoding. Empty regions show `0/0`. Rows use a
+spinner for preparation before the header is available, then show a chunk bar for
+chunk processing, finishing for analysis handoff, writing for conversion, and
+failure without treating completed chunks as a successful region. Writing and
+finishing retain a full chunk bar; failure preserves the last successful count.
+
+The display keeps only the rows that fit the terminal, promotes waiting active
+regions as rows become free, and reports omitted active regions. It refreshes
+when the terminal size changes. If the dimensions are unknown or too small for
+detail bars, the aggregate row reports the omitted active count. Redirected
+standard error and `--no-progress`
+disable all progress output; standard output remains suitable for machine
+consumption.
+
 The converter writes into a clearly named sibling staging directory. Each
 transformed NBT or region file is checked against the target catalogs while it
 is transformed, then encoded, flushed, and committed through a temporary

@@ -617,36 +617,84 @@ where
                         phase: crate::work::WorkPhase::Analysis,
                         path: relative_path.clone(),
                     });
+                    let mut completed_chunks = 0_u16;
                     let findings = scan_region_batches(
                         &absolute_path,
                         Path::new(&relative_path),
                         &bytes,
                         &dimension,
-                        &mut |key, batch| observe_batch(&mut reducer, key, batch),
-                    )?;
-                    Ok((relative_path, true, Some(reducer), findings))
+                        &mut |key, batch| {
+                            observe_batch(&mut reducer, key, batch)?;
+                            completed_chunks = completed_chunks.saturating_add(1);
+                            progress.observe(ProgressEvent::RegionChunkCompleted {
+                                phase: crate::work::WorkPhase::Analysis,
+                                path: relative_path.clone(),
+                                completed_chunks,
+                            });
+                            Ok(())
+                        },
+                        |total_chunks| {
+                            progress.observe(ProgressEvent::RegionPrepared {
+                                phase: crate::work::WorkPhase::Analysis,
+                                path: relative_path.clone(),
+                                total_chunks,
+                            });
+                        },
+                    );
+                    let findings = match findings {
+                        Ok(findings) => findings,
+                        Err(error) => {
+                            progress.observe(ProgressEvent::RegionFailed {
+                                phase: crate::work::WorkPhase::Analysis,
+                                path: relative_path,
+                                completed_chunks,
+                            });
+                            return Err(error);
+                        }
+                    };
+                    progress.observe(ProgressEvent::RegionFinishing {
+                        phase: crate::work::WorkPhase::Analysis,
+                        path: relative_path.clone(),
+                    });
+                    Ok((
+                        relative_path,
+                        true,
+                        completed_chunks,
+                        Some(reducer),
+                        findings,
+                    ))
                 }
                 AnalysisInput::Ready { key, batch } => {
                     observe_batch(&mut reducer, key, batch)?;
-                    Ok((String::new(), false, Some(reducer), Vec::new()))
+                    Ok((String::new(), false, 0, Some(reducer), Vec::new()))
                 }
             }
         },
-        |key, (path, is_region, reducer, findings)| {
-            reduce_region(
+        |key, (path, is_region, completed_chunks, reducer, findings)| {
+            if let Err(error) = reduce_region(
                 key.clone(),
                 reducer.take().expect("completion handles reducer once"),
-            )?;
+            ) {
+                if *is_region {
+                    progress.observe(ProgressEvent::RegionFailed {
+                        phase: crate::work::WorkPhase::Analysis,
+                        path: path.clone(),
+                        completed_chunks: *completed_chunks,
+                    });
+                }
+                return Err(error);
+            }
             validation_findings.borrow_mut().append(findings);
             if *is_region {
                 progress.observe(ProgressEvent::RegionCompleted {
                     phase: crate::work::WorkPhase::Analysis,
                     path: path.clone(),
+                    completed_chunks: *completed_chunks,
                 });
             }
             Ok(())
         },
-        |_key, (_path, _is_region, reducer, findings)| {
+        |_key, (_path, _is_region, _completed_chunks, reducer, findings)| {
             debug_assert!(reducer.is_none());
             debug_assert!(findings.is_empty());
             Ok(())
@@ -685,12 +733,14 @@ fn scan_region_batches(
     bytes: &[u8],
     dimension: &DimensionId,
     consume: &mut impl FnMut(crate::work::WorkKey, Vec<LocatedObject>) -> Result<()>,
+    prepared: impl FnOnce(u16),
 ) -> Result<Vec<crate::inventory::ValidationFinding>> {
     let reader =
         RegionReader::new(bytes, DEFAULT_MAX_CHUNK_BYTES).map_err(|source| Error::Region {
             path: path.to_owned(),
             source,
         })?;
+    prepared(reader.populated_chunk_count());
     let [region_x, region_z] = region_coordinates(path)?;
     let mut findings = Vec::new();
     for local_z in 0..32 {
@@ -1632,9 +1682,19 @@ mod tests {
                     phase: crate::work::WorkPhase::Analysis,
                     path: "region/r.0.0.mca".into(),
                 },
+                ProgressEvent::RegionPrepared {
+                    phase: crate::work::WorkPhase::Analysis,
+                    path: "region/r.0.0.mca".into(),
+                    total_chunks: 0,
+                },
+                ProgressEvent::RegionFinishing {
+                    phase: crate::work::WorkPhase::Analysis,
+                    path: "region/r.0.0.mca".into(),
+                },
                 ProgressEvent::RegionCompleted {
                     phase: crate::work::WorkPhase::Analysis,
                     path: "region/r.0.0.mca".into(),
+                    completed_chunks: 0,
                 },
             ]
         );
@@ -1646,7 +1706,13 @@ mod tests {
         );
         assert!(matches!(
             events.lock().unwrap().as_slice(),
-            [ProgressEvent::RegionStarted { .. }]
+            [
+                ProgressEvent::RegionStarted { .. },
+                ProgressEvent::RegionFailed {
+                    completed_chunks: 0,
+                    ..
+                }
+            ]
         ));
     }
 

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use crate::convert;
 use crate::nbt::{self, Value};
@@ -88,6 +89,24 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+struct SuccessfulChunkObserver<'a> {
+    observer: &'a dyn crate::progress::ProgressObserver,
+    completed_chunks: AtomicU16,
+}
+
+impl crate::progress::ProgressObserver for SuccessfulChunkObserver<'_> {
+    fn observe(&self, event: crate::progress::ProgressEvent) {
+        if let crate::progress::ProgressEvent::RegionChunkCompleted {
+            completed_chunks, ..
+        } = &event
+        {
+            self.completed_chunks
+                .store(*completed_chunks, Ordering::Relaxed);
+        }
+        self.observer.observe(event);
+    }
+}
+
 /// Convert a source region directly into an uncommitted staged file.
 ///
 /// # Errors
@@ -108,9 +127,12 @@ pub fn convert_source_region(
         source_catalog,
         target_catalog,
         rules,
+        &crate::progress::NoProgress,
     )
+    .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn convert_source_region_observed(
     source_path: &Path,
     temporary: &Path,
@@ -119,35 +141,52 @@ pub(crate) fn convert_source_region_observed(
     source_catalog: &RegistryCatalog,
     target_catalog: &RegistryCatalog,
     rules: &LoadedRules,
-) -> Result<()> {
-    let original = fs::read(source_path).map_err(|source| Error::Read {
-        path: source_path.to_owned(),
-        source,
-    })?;
-    let converted = convert_region_bytes(
-        source_path,
-        relative_path,
-        dimension,
-        &original,
-        source_catalog,
-        target_catalog,
-        rules,
-    )?;
-    let file = fs::File::create(temporary).map_err(|source| Error::Publish {
-        path: temporary.to_owned(),
-        source,
-    })?;
-    let mut writer = BufWriter::new(file);
-    writer
-        .write_all(&converted)
-        .and_then(|()| writer.flush())
-        .map_err(|source| Error::Publish {
+    progress: &dyn crate::progress::ProgressObserver,
+) -> Result<u16> {
+    let observer = SuccessfulChunkObserver {
+        observer: progress,
+        completed_chunks: AtomicU16::new(0),
+    };
+    let result = (|| {
+        let original = fs::read(source_path).map_err(|source| Error::Read {
+            path: source_path.to_owned(),
+            source,
+        })?;
+        let (converted, completed_chunks) = convert_region_bytes(
+            source_path,
+            relative_path,
+            dimension,
+            &original,
+            source_catalog,
+            target_catalog,
+            rules,
+            &observer,
+        )?;
+        let file = fs::File::create(temporary).map_err(|source| Error::Publish {
             path: temporary.to_owned(),
             source,
         })?;
-    Ok(())
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(&converted)
+            .and_then(|()| writer.flush())
+            .map_err(|source| Error::Publish {
+                path: temporary.to_owned(),
+                source,
+            })?;
+        Ok(completed_chunks)
+    })();
+    if result.is_err() {
+        progress.observe(crate::progress::ProgressEvent::RegionFailed {
+            phase: crate::work::WorkPhase::Staging,
+            path: relative_path.to_owned(),
+            completed_chunks: observer.completed_chunks.load(Ordering::Relaxed),
+        });
+    }
+    result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_region_bytes(
     path: &Path,
     relative_path: &str,
@@ -156,16 +195,23 @@ fn convert_region_bytes(
     source_catalog: &RegistryCatalog,
     target_catalog: &RegistryCatalog,
     rules: &LoadedRules,
-) -> Result<Vec<u8>> {
+    progress: &dyn crate::progress::ProgressObserver,
+) -> Result<(Vec<u8>, u16)> {
     let reader =
         RegionReader::new(bytes, DEFAULT_MAX_CHUNK_BYTES).map_err(|source| Error::Region {
             path: path.to_owned(),
             source: Box::new(source),
         })?;
+    progress.observe(crate::progress::ProgressEvent::RegionPrepared {
+        phase: crate::work::WorkPhase::Staging,
+        path: relative_path.to_owned(),
+        total_chunks: reader.populated_chunk_count(),
+    });
     let mut writer = RegionWriter::new().map_err(|source| Error::Region {
         path: path.to_owned(),
         source: Box::new(source),
     })?;
+    let mut completed_chunks = 0_u16;
     for z in 0..32 {
         for x in 0..32 {
             let Some(raw) = reader.read_chunk(x, z).map_err(|source| Error::Region {
@@ -219,13 +265,23 @@ fn convert_region_bytes(
                     path: path.to_owned(),
                     source: Box::new(source),
                 })?;
+            completed_chunks = completed_chunks.saturating_add(1);
+            progress.observe(crate::progress::ProgressEvent::RegionChunkCompleted {
+                phase: crate::work::WorkPhase::Staging,
+                path: relative_path.to_owned(),
+                completed_chunks,
+            });
         }
     }
+    progress.observe(crate::progress::ProgressEvent::RegionWriting {
+        phase: crate::work::WorkPhase::Staging,
+        path: relative_path.to_owned(),
+    });
     let bytes = writer.finish().map_err(|source| Error::Region {
         path: path.to_owned(),
         source: Box::new(source),
     })?;
-    Ok(bytes)
+    Ok((bytes, completed_chunks))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -526,6 +582,8 @@ fn int(compound: &BTreeMap<String, Value>, field: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::nbt::{Document, List, Tag};
     use crate::registry::{Provenance, RegistryEntry, RegistryName};
@@ -541,6 +599,46 @@ mod tests {
             })
             .unwrap();
         catalog
+    }
+
+    #[test]
+    fn temporary_write_failure_reports_all_successfully_encoded_chunks() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("r.0.0.mca");
+        let temporary = root.path().join("temporary-directory");
+        fs::create_dir(&temporary).unwrap();
+        let document = Document {
+            root_name: String::new(),
+            root: BTreeMap::new(),
+        };
+        let mut writer = RegionWriter::new().unwrap();
+        writer
+            .write_chunk(0, 0, &nbt::encode_uncompressed(&document).unwrap(), 0)
+            .unwrap();
+        fs::write(&source, writer.finish().unwrap()).unwrap();
+        let events = Mutex::new(Vec::new());
+        let observer = |event| events.lock().unwrap().push(event);
+
+        let error = convert_source_region_observed(
+            &source,
+            &temporary,
+            "region/r.0.0.mca",
+            &crate::world::DimensionId::Overworld,
+            &RegistryCatalog::default(),
+            &RegistryCatalog::default(),
+            &LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10),
+            &observer,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::Publish { .. }));
+        assert!(matches!(
+            events.lock().unwrap().last(),
+            Some(crate::progress::ProgressEvent::RegionFailed {
+                completed_chunks: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -589,9 +687,10 @@ mod tests {
             &catalog("mod:machine", 20),
             &catalog("mod:machine", 300),
             &rules,
+            &crate::progress::NoProgress,
         )
         .unwrap();
-        let reader = RegionReader::new(&output, DEFAULT_MAX_CHUNK_BYTES).unwrap();
+        let reader = RegionReader::new(&output.0, DEFAULT_MAX_CHUNK_BYTES).unwrap();
         assert_eq!(reader.timestamp(0, 0).unwrap(), 42);
         let decoded = nbt::decode_uncompressed(&reader.read_chunk(0, 0).unwrap().unwrap()).unwrap();
         let Value::Compound(level) = decoded.root.get("Level").unwrap() else {
@@ -631,9 +730,10 @@ mod tests {
                 &RegistryCatalog::default(),
                 &RegistryCatalog::default(),
                 &rules,
+                &crate::progress::NoProgress,
             )
             .unwrap();
-            assert_eq!(output.len(), expected_len);
+            assert_eq!(output.0.len(), expected_len);
             drop(output);
         }
     }
@@ -677,6 +777,7 @@ mod tests {
                 value_maps: BTreeMap::new(),
                 ..LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10)
             },
+            &crate::progress::NoProgress,
         )
         .unwrap_err();
         assert!(matches!(error, Error::TargetRange { id: 4096, .. }));
