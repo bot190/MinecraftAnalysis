@@ -1042,6 +1042,64 @@ pub fn evaluate_item_for_execution<'a>(
     ExecutionDecision { selected }
 }
 
+/// Read-only identity projection from the first runtime item-rule candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ItemIdentityProjection<'a> {
+    NoCandidate,
+    RequiresStack {
+        rule_id: &'a str,
+    },
+    MissingProjection {
+        rule_id: &'a str,
+    },
+    Explicit {
+        rule_id: &'a str,
+        target_name: &'a str,
+        /// Resolved catalog entry, including alias resolution; absent for invalid targets.
+        target: Option<&'a RegistryEntry>,
+    },
+}
+
+/// Assess `map_item_id` eligibility without rendering any template.
+#[must_use]
+pub fn assess_item_identity_projection<'a>(
+    rules: &'a LoadedRules,
+    name: &RegistryName,
+    numeric_id: i32,
+    target_catalog: &'a RegistryCatalog,
+) -> ItemIdentityProjection<'a> {
+    let candidates = item_candidates(rules, name, numeric_id);
+    let Some(&index) = candidates.first() else {
+        return ItemIdentityProjection::NoCandidate;
+    };
+    let rule = &rules.ordered_rules[index];
+    let RuleBody::Item {
+        matcher,
+        target_name,
+        ..
+    } = &rule.body
+    else {
+        unreachable!("item index contains only item rules");
+    };
+    if !matches!(matcher.damage, NumericPredicate::Any)
+        || !matches!(matcher.count, NumericPredicate::Any)
+        || !matcher.nbt.is_empty()
+    {
+        return ItemIdentityProjection::RequiresStack { rule_id: &rule.id };
+    }
+    let Some(target_name) = target_name else {
+        return ItemIdentityProjection::MissingProjection { rule_id: &rule.id };
+    };
+    let target = RegistryName::parse(target_name)
+        .ok()
+        .and_then(|name| target_catalog.by_name(&RegistryKind::Item, &name));
+    ItemIdentityProjection::Explicit {
+        rule_id: &rule.id,
+        target_name,
+        target,
+    }
+}
+
 fn item_candidates(rules: &LoadedRules, name: &RegistryName, numeric_id: i32) -> Vec<usize> {
     let mut candidates = rules
         .indices
@@ -1055,6 +1113,231 @@ fn item_candidates(rules: &LoadedRules, name: &RegistryName, numeric_id: i32) ->
         candidates.dedup();
     }
     candidates
+}
+
+#[cfg(test)]
+mod item_projection_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn stock_executor() -> TemplateExecutor {
+        let mut source = RegistryCatalog::default();
+        let mut target = RegistryCatalog::default();
+        for (catalog, name, numeric_id) in [
+            (&mut source, "minecraft:cooked_fished", 350),
+            (&mut target, "minecraft:cooked_fish", 9000),
+        ] {
+            catalog
+                .insert(RegistryEntry {
+                    kind: RegistryKind::Item,
+                    name: RegistryName::parse(name).unwrap(),
+                    numeric_id,
+                    provenance: Provenance::world("test", "fixture"),
+                })
+                .unwrap();
+        }
+        TemplateExecutor {
+            source,
+            target,
+            rules: LoadedRules::empty(SourceProfile::Forge1_7_10),
+            limits: NestedLimits {
+                max_depth: 8,
+                max_objects: 100,
+            },
+            state: std::sync::Mutex::new(TemplateExecutionState::default()),
+        }
+    }
+
+    #[test]
+    fn stock_identity_mapping_validates_targets_and_preserves_rule_precedence() {
+        let mut executor = stock_executor();
+        assert_eq!(
+            executor.map_item_id(350).unwrap().as_str(),
+            Some("minecraft:cooked_fish")
+        );
+        assert_eq!(
+            executor.state.lock().unwrap().identity_maps[0].rule_id,
+            "builtin:forge-1.7.10:item"
+        );
+        executor.target = RegistryCatalog::default();
+        assert!(executor
+            .map_item_id(350)
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        executor = stock_executor();
+        executor.source.replace_explicit(RegistryEntry {
+            kind: RegistryKind::Item,
+            name: RegistryName::parse("mod:custom_fish").unwrap(),
+            numeric_id: 350,
+            provenance: Provenance::world("test", "modded slot"),
+        });
+        assert!(executor
+            .map_item_id(350)
+            .unwrap_err()
+            .to_string()
+            .contains("no item rule"));
+        executor = stock_executor();
+        executor
+            .target
+            .insert_alias(crate::registry::Alias {
+                kind: RegistryKind::Item,
+                from: RegistryName::parse("minecraft:cooked_fish").unwrap(),
+                to: RegistryName::parse("target:fish").unwrap(),
+                provenance: Provenance::world("test", "alias"),
+            })
+            .unwrap();
+        executor
+            .target
+            .insert(RegistryEntry {
+                kind: RegistryKind::Item,
+                name: RegistryName::parse("target:fish").unwrap(),
+                numeric_id: 10000,
+                provenance: Provenance::world("test", "target"),
+            })
+            .unwrap();
+        assert_eq!(
+            executor.map_item_id(350).unwrap().as_str(),
+            Some("target:fish")
+        );
+        for (matcher, target_name, expected) in [
+            (
+                json!({"name":"minecraft:cooked_fished"}),
+                Some("target:fish"),
+                "target:fish",
+            ),
+            (
+                json!({"name":"minecraft:cooked_fished"}),
+                None,
+                "no target_name",
+            ),
+            (
+                json!({"name":"minecraft:cooked_fished","damage":{"mode":"exact","value":0}}),
+                Some("target:fish"),
+                "complete stack",
+            ),
+        ] {
+            executor.rules.ordered_rules = vec![serde_json::from_value(json!({
+                "id":"authored", "object":"item", "matcher":matcher,
+                "target_name":target_name, "template":"{}"
+            }))
+            .unwrap()];
+            executor.rules.indices = build_indices(&executor.rules.ordered_rules);
+            let result = executor.map_item_id(350);
+            if expected == "target:fish" {
+                assert_eq!(result.unwrap().as_str(), Some(expected));
+            } else {
+                assert!(result.unwrap_err().to_string().contains(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn stock_nested_transform_uses_profile_mapping_and_world_numeric_id() {
+        let executor = std::sync::Arc::new(stock_executor());
+        let stack = typed_nbt(&Value::Compound(BTreeMap::from([
+            ("id".into(), Value::Short(350)),
+            ("Count".into(), Value::Byte(2)),
+            ("Damage".into(), Value::Short(1)),
+        ])));
+        let output = executor
+            .transform_item(minijinja::Value::from_serialize(&stack))
+            .unwrap();
+        let result: TypedNbt =
+            serde_json::from_value(serde_json::to_value(output).unwrap()).unwrap();
+        let Value::Compound(output) = Value::from(result) else {
+            panic!()
+        };
+        assert_eq!(output["id"], Value::Short(9000));
+        assert_eq!(output["Count"], Value::Byte(2));
+        assert_eq!(output["Damage"], Value::Short(1));
+    }
+
+    #[test]
+    fn first_candidate_controls_projection_without_rendering() {
+        let name = RegistryName::parse("source:item").unwrap();
+        let mut target = RegistryCatalog::default();
+        target
+            .insert(RegistryEntry {
+                kind: RegistryKind::Item,
+                name: RegistryName::parse("target:item").unwrap(),
+                numeric_id: 50,
+                provenance: Provenance::world("test", "fixture"),
+            })
+            .unwrap();
+        let mut loaded = LoadedRules::empty(SourceProfile::Forge1_7_10);
+        assert_eq!(
+            assess_item_identity_projection(&loaded, &name, 5, &target),
+            ItemIdentityProjection::NoCandidate
+        );
+
+        for (matcher, projection, expected) in [
+            (json!({"name":"source:item"}), Some("target:item"), "valid"),
+            (
+                json!({"legacy_id":5,"registry":"item"}),
+                Some("target:item"),
+                "valid",
+            ),
+            (
+                json!({"name":"source:item","damage":{"mode":"exact","value":0}}),
+                Some("target:item"),
+                "stack",
+            ),
+            (
+                json!({"name":"source:item","count":{"mode":"exact","value":1}}),
+                Some("target:item"),
+                "stack",
+            ),
+            (
+                json!({"name":"source:item","nbt":[{"path":["tag"],"predicate":"exists"}]}),
+                Some("target:item"),
+                "stack",
+            ),
+            (json!({"name":"source:item"}), None, "missing"),
+            (
+                json!({"name":"source:item"}),
+                Some("target:absent"),
+                "invalid",
+            ),
+            (json!({"name":"source:item"}), Some("malformed"), "invalid"),
+        ] {
+            let first: Rule = serde_json::from_value(json!({
+                "id":"first", "object":"item", "matcher":matcher,
+                "target_name":projection, "template":"{{ must_never_render() }}"
+            }))
+            .unwrap();
+            let later: Rule = serde_json::from_value(json!({
+                "id":"later", "object":"item", "matcher":{"name":"source:item"},
+                "target_name":"target:item", "template":"{{ must_never_render() }}"
+            }))
+            .unwrap();
+            loaded.ordered_rules = vec![first, later];
+            loaded.indices = build_indices(&loaded.ordered_rules);
+            let actual = assess_item_identity_projection(&loaded, &name, 5, &target);
+            match expected {
+                "valid" => assert!(
+                    matches!(actual, ItemIdentityProjection::Explicit {rule_id: "first", target: Some(entry), ..} if entry.numeric_id == 50)
+                ),
+                "stack" => assert_eq!(
+                    actual,
+                    ItemIdentityProjection::RequiresStack { rule_id: "first" }
+                ),
+                "missing" => assert_eq!(
+                    actual,
+                    ItemIdentityProjection::MissingProjection { rule_id: "first" }
+                ),
+                "invalid" => assert!(matches!(
+                    actual,
+                    ItemIdentityProjection::Explicit {
+                        rule_id: "first",
+                        target: None,
+                        ..
+                    }
+                )),
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 fn evaluate_block_with_entity(
@@ -1486,7 +1769,14 @@ impl TemplateExecutor {
         let output = match result {
             crate::template::ItemResult::Drop => None,
             crate::template::ItemResult::Unchanged => Some(crate::template::TargetItem {
-                name: original.name.clone(),
+                name: if selected_id.is_none() {
+                    crate::profile::WorldProfile::from(self.rules.source_profile)
+                        .stock_item_target(&name)
+                        .unwrap_or(&original.name)
+                        .to_owned()
+                } else {
+                    original.name.clone()
+                },
                 count: original.count,
                 damage: original.damage,
                 nbt: original.nbt,
@@ -1541,41 +1831,54 @@ impl TemplateExecutor {
             .ok_or_else(|| {
                 template_function_error(format!("unresolved source item numeric ID {numeric_id}"))
             })?;
-        let candidates = item_candidates(&self.rules, &entry.name, numeric_id);
-        let index = *candidates.first().ok_or_else(|| {
-            template_function_error(format!("no item rule maps `{}`", entry.name))
-        })?;
-        let rule = &self.rules.ordered_rules[index];
-        let RuleBody::Item {
-            matcher,
-            target_name,
-            ..
-        } = &rule.body
-        else {
-            unreachable!()
+        let built_in_rule_id = format!("builtin:{}:item", self.rules.source_profile.as_str());
+        let (rule_id, target_name) = match assess_item_identity_projection(
+            &self.rules,
+            &entry.name,
+            numeric_id,
+            &self.target,
+        ) {
+            ItemIdentityProjection::NoCandidate => {
+                let name = crate::profile::WorldProfile::from(self.rules.source_profile)
+                    .stock_item_target(&entry.name)
+                    .ok_or_else(|| {
+                        template_function_error(format!("no item rule maps `{}`", entry.name))
+                    })?;
+                let target_name = RegistryName::parse(name).map_err(template_function_error)?;
+                let resolved = self
+                    .target
+                    .by_name(&RegistryKind::Item, &target_name)
+                    .ok_or_else(|| {
+                        template_function_error(format!(
+                            "target stock item identity `{name}` is unavailable"
+                        ))
+                    })?;
+                (built_in_rule_id.as_str(), resolved.name.as_str())
+            }
+            ItemIdentityProjection::RequiresStack { rule_id } => {
+                return Err(template_function_error(format!(
+                    "item rule `{rule_id}` requires complete stack evidence; use transform_item"
+                )))
+            }
+            ItemIdentityProjection::MissingProjection { rule_id } => {
+                return Err(template_function_error(format!(
+                    "item rule `{rule_id}` has no target_name projection"
+                )))
+            }
+            ItemIdentityProjection::Explicit {
+                rule_id,
+                target_name,
+                target,
+            } => {
+                RegistryName::parse(target_name).map_err(template_function_error)?;
+                if target.is_none() {
+                    return Err(template_function_error(format!(
+                        "target item identity `{target_name}` from rule `{rule_id}` is unavailable",
+                    )));
+                }
+                (rule_id, target_name)
+            }
         };
-        if !matches!(matcher.damage, NumericPredicate::Any)
-            || !matches!(matcher.count, NumericPredicate::Any)
-            || !matcher.nbt.is_empty()
-        {
-            return Err(template_function_error(format!(
-                "item rule `{}` requires complete stack evidence; use transform_item",
-                rule.id
-            )));
-        }
-        let target_name = target_name.as_ref().ok_or_else(|| {
-            template_function_error(format!(
-                "item rule `{}` has no target_name projection",
-                rule.id
-            ))
-        })?;
-        let target = RegistryName::parse(target_name).map_err(template_function_error)?;
-        if self.target.by_name(&RegistryKind::Item, &target).is_none() {
-            return Err(template_function_error(format!(
-                "target item identity `{target_name}` from rule `{}` is unavailable",
-                rule.id
-            )));
-        }
         self.state
             .lock()
             .map_err(template_function_error)?
@@ -1583,10 +1886,10 @@ impl TemplateExecutor {
             .push(IdentityMapOutcome {
                 numeric_id,
                 source: entry.name.to_string(),
-                rule_id: rule.id.clone(),
-                target: target_name.clone(),
+                rule_id: rule_id.to_owned(),
+                target: target_name.to_owned(),
             });
-        Ok(minijinja::Value::from(target_name.clone()))
+        Ok(minijinja::Value::from(target_name.to_owned()))
     }
 }
 

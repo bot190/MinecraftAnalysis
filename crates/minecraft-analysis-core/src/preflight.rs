@@ -988,6 +988,14 @@ fn assess(
     let source_identity = resolved
         .as_ref()
         .map_or_else(|| fallback_identity(&object), ToString::to_string);
+    let built_in_target = resolved.as_ref().and_then(|name| {
+        (kind == Some(RegistryKind::Item))
+            .then(|| {
+                crate::profile::WorldProfile::from(loaded.source_profile).stock_item_target(name)
+            })
+            .flatten()
+    });
+    let default_target = built_in_target.unwrap_or(&source_identity);
     let decision = match (&object.kind, &kind, &resolved) {
         (ObjectKind::Block, Some(kind), Some(name)) => {
             rules::evaluate_coordinated_block(
@@ -1221,13 +1229,15 @@ fn assess(
             }
         }
     } else if kind.as_ref().is_none_or(|kind| {
-        resolved
-            .as_ref()
-            .is_some_and(|name| target.by_name(kind, name).is_some())
+        RegistryName::parse(default_target).is_ok_and(|name| target.by_name(kind, &name).is_some())
     }) {
         (
-            Some(source_identity.clone()),
-            Disposition::Unchanged,
+            Some(default_target.to_owned()),
+            if default_target == source_identity {
+                Disposition::Unchanged
+            } else {
+                Disposition::Transformed
+            },
             None,
             Vec::new(),
         )

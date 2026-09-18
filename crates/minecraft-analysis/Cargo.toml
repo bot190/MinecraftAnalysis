@@ -14,11 +14,9 @@ minecraft-analysis-core = { path = "../minecraft-analysis-core" }
 ratatui.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

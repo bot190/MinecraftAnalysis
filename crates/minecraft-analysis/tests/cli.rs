@@ -5,6 +5,9 @@ use std::process::{Command, Output};
 use minecraft_analysis_core::nbt::{self, Compression, Document, List, Tag, Value};
 use minecraft_analysis_core::region::RegionWriter;
 
+#[path = "cli/item_mappings.rs"]
+mod item_mappings;
+
 fn update_manifest(rule: &std::path::Path, id_map: &std::path::Path, side: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_minecraft-analysis"))
         .args(["rules", "update-manifest", "--rules"])

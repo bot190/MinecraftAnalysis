@@ -400,11 +400,18 @@ fn convert_item(
             source: Box::new(source),
         })),
     })?;
+    let default_name = if decision.selected.is_none() {
+        crate::profile::WorldProfile::from(loaded.source_profile)
+            .stock_item_target(&source_name)
+            .unwrap_or(source_name.as_str())
+    } else {
+        source_name.as_str()
+    };
     let target_item = match rendered {
         Some(ItemResult::Drop) => return Ok(None),
         Some(ItemResult::Transform { item }) => item,
         None | Some(ItemResult::Unchanged) => crate::template::TargetItem {
-            name: source_name.to_string(),
+            name: default_name.to_owned(),
             count: i8::try_from(numeric(compound, "Count")).unwrap_or_default(),
             damage: i16::try_from(numeric(compound, "Damage")).unwrap_or_default(),
             nbt: rules::typed_nbt(&item),
@@ -523,6 +530,52 @@ mod tests {
     use super::*;
     use crate::nbt::{List, Tag};
     use crate::registry::{Provenance, RegistryEntry};
+
+    #[test]
+    fn stock_item_conversion_uses_profiles_without_authored_rules() {
+        let item = Value::Compound(BTreeMap::from([
+            ("id".into(), Value::Short(350)),
+            ("Damage".into(), Value::Short(1)),
+            ("Count".into(), Value::Byte(2)),
+            ("Custom".into(), Value::Int(42)),
+        ]));
+        let source = catalog("minecraft:cooked_fished", 350);
+        let target = catalog("minecraft:cooked_fish", 9000);
+        let loaded = LoadedRules::empty(crate::rules::SourceProfile::Forge1_7_10);
+        let limits = NestedLimits {
+            max_depth: 8,
+            max_objects: 100,
+        };
+        let output = convert_item(
+            Path::new("player.dat"),
+            item.clone(),
+            &source,
+            &target,
+            &loaded,
+            limits,
+            &mut [],
+            "Inventory[0]",
+        )
+        .unwrap()
+        .unwrap();
+        let Value::Compound(output) = output else {
+            panic!()
+        };
+        assert_eq!(output["id"], Value::Short(9000));
+        assert_eq!(output["Custom"], Value::Int(42));
+        assert_eq!(output["Damage"], Value::Short(1));
+        assert!(convert_item(
+            Path::new("player.dat"),
+            item,
+            &source,
+            &RegistryCatalog::default(),
+            &loaded,
+            limits,
+            &mut [],
+            "Inventory[0]"
+        )
+        .is_err());
+    }
 
     fn catalog(name: &str, id: i32) -> RegistryCatalog {
         let mut result = RegistryCatalog::default();

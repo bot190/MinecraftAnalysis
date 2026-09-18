@@ -6,6 +6,7 @@ pub mod coverage;
 pub mod document_conversion;
 pub mod explanation;
 pub mod inventory;
+pub mod item_mappings;
 pub mod manifest_authoring;
 pub mod nbt;
 pub mod pipeline;

@@ -6,11 +6,46 @@ use std::path::{Path, PathBuf};
 
 use crate::nbt::{self, Document, Value};
 
+mod stock_items;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorldProfile {
     Forge1_2_5,
     Forge1_7_10,
     Forge1_12_2,
+}
+
+impl WorldProfile {
+    /// Classify a canonical item identity independently of numeric ID or provenance.
+    #[must_use]
+    pub fn is_stock_item(self, name: &crate::registry::RegistryName) -> bool {
+        stock_items::contains(self, name.as_str())
+    }
+
+    /// Hardcoded stock identity projection into the Forge 1.12.2 target profile.
+    ///
+    /// The caller must resolve this name in the actual target catalog. Historical
+    /// technical identities may be unavailable there; this does not invent a replacement.
+    #[must_use]
+    pub fn stock_item_target(self, name: &crate::registry::RegistryName) -> Option<&str> {
+        self.is_stock_item(name).then(|| {
+            // The 1.7.10 bootstrap persisted this spelling, corrected in 1.12.2.
+            if self == Self::Forge1_7_10 && name.as_str() == "minecraft:cooked_fished" {
+                "minecraft:cooked_fish"
+            } else {
+                name.as_str()
+            }
+        })
+    }
+}
+
+impl From<crate::rules::SourceProfile> for WorldProfile {
+    fn from(source: crate::rules::SourceProfile) -> Self {
+        match source {
+            crate::rules::SourceProfile::Forge1_2_5 => Self::Forge1_2_5,
+            crate::rules::SourceProfile::Forge1_7_10 => Self::Forge1_7_10,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -329,6 +364,53 @@ fn has_anvil_regions(world: &Path) -> std::io::Result<bool> {
 mod tests {
     use super::*;
     use crate::nbt::{List, Tag};
+
+    #[test]
+    fn stock_profile_sets_are_complete_sorted_and_version_specific() {
+        use crate::registry::{RegistryCatalog, RegistryKind, RegistryName};
+        let name = |name| RegistryName::parse(name).unwrap();
+        for profile in [
+            WorldProfile::Forge1_2_5,
+            WorldProfile::Forge1_7_10,
+            WorldProfile::Forge1_12_2,
+        ] {
+            for stock in [
+                "minecraft:apple",
+                "minecraft:diamond_sword",
+                "minecraft:record_11",
+                "minecraft:enchanting_table",
+            ] {
+                assert!(profile.is_stock_item(&name(stock)), "{profile:?}: {stock}");
+                assert_eq!(profile.stock_item_target(&name(stock)), Some(stock));
+            }
+            for non_stock in ["mod:apple", "minecraft:modded_item", "legacy:item.Apple"] {
+                assert!(!profile.is_stock_item(&name(non_stock)));
+                assert_eq!(profile.stock_item_target(&name(non_stock)), None);
+            }
+        }
+        let legacy = RegistryCatalog::forge_1_2_5();
+        let actual: std::collections::BTreeSet<_> = legacy
+            .entries()
+            .filter(|entry| entry.kind == RegistryKind::Item)
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(actual.len(), 256);
+        assert!(legacy
+            .entries()
+            .filter(|entry| entry.kind == RegistryKind::Item)
+            .all(|entry| WorldProfile::Forge1_2_5.is_stock_item(&entry.name)));
+        assert!(!WorldProfile::Forge1_2_5.is_stock_item(&name("minecraft:record_wait")));
+        assert!(WorldProfile::Forge1_7_10.is_stock_item(&name("minecraft:record_wait")));
+        assert!(!WorldProfile::Forge1_7_10.is_stock_item(&name("minecraft:elytra")));
+        assert!(WorldProfile::Forge1_12_2.is_stock_item(&name("minecraft:elytra")));
+        assert!(WorldProfile::Forge1_12_2.is_stock_item(&name("minecraft:knowledge_book")));
+        assert!(WorldProfile::Forge1_12_2.is_stock_item(&name("minecraft:white_shulker_box")));
+        assert!(!WorldProfile::Forge1_12_2.is_stock_item(&name("minecraft:flowing_water")));
+        assert_eq!(
+            WorldProfile::Forge1_7_10.stock_item_target(&name("minecraft:cooked_fished")),
+            Some("minecraft:cooked_fish")
+        );
+    }
 
     fn document(fml: BTreeMap<String, Value>, data_version: Option<i32>) -> Document {
         let mut data = BTreeMap::new();
