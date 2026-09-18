@@ -117,12 +117,30 @@ impl FromStr for BlockCoordinate {
 
 #[derive(Debug, Subcommand)]
 enum RulesCommand {
+    /// Report the complete non-stock item mapping authoring worksheet.
+    ItemMappings(ItemMappingInputs),
     /// Report source blocks and items not covered by vanilla migration or rules.
     Coverage(CoverageInputs),
     /// Update one rule manifest from a runtime-generated numeric ID map.
     UpdateManifest(UpdateManifestInputs),
     /// Infer an exact rule from one paired source and target world coordinate.
     Infer(InferInputs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct ItemMappingInputs {
+    /// Transformation rule document; may be supplied more than once.
+    #[arg(long, required = true, value_name = "FILE")]
+    rules: Vec<PathBuf>,
+    /// Rule-selected Forge source world.
+    #[arg(long, value_name = "WORLD")]
+    source_world: PathBuf,
+    /// Forge 1.12.2 target world.
+    #[arg(long, value_name = "WORLD")]
+    target_world: PathBuf,
+    /// Write pretty JSON to this file instead of standard output.
+    #[arg(long, value_name = "FILE")]
+    report: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -350,6 +368,10 @@ fn run() -> miette::Result<i32> {
             }
         },
         Command::Rules { command } => match command {
+            RulesCommand::ItemMappings(inputs) => {
+                run_item_mappings(&inputs)?;
+                Ok(0)
+            }
             RulesCommand::Coverage(inputs) => {
                 let reporter = progress.reporter();
                 run_coverage(&inputs, &reporter, execution)
@@ -375,6 +397,82 @@ fn run() -> miette::Result<i32> {
     };
     progress.finish();
     result
+}
+
+fn run_item_mappings(inputs: &ItemMappingInputs) -> miette::Result<()> {
+    let source_world = canonical_world(&inputs.source_world, "source")?;
+    let target_world = canonical_world(&inputs.target_world, "target")?;
+    let (source, target, loaded) = prepare_catalogs(&source_world, &target_world, &inputs.rules)?;
+    let output = inputs
+        .report
+        .as_ref()
+        .map(|path| item_mapping_output_path(path, &source_world, &target_world, &loaded))
+        .transpose()?;
+    let report = minecraft_analysis_core::item_mappings::analyze(&source, &target, &loaded)
+        .map_err(|error| miette!(error.to_string()))?;
+    let mut bytes = serde_json::to_vec_pretty(&report).into_diagnostic()?;
+    bytes.push(b'\n');
+    if let Some(path) = output {
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".item-mappings-")
+            .tempfile_in(path.parent().expect("resolved report has a parent"))
+            .map_err(|error| {
+                miette!(
+                    "cannot create item mapping report {}: {error}",
+                    path.display()
+                )
+            })?;
+        temporary.write_all(&bytes).into_diagnostic()?;
+        temporary.as_file().sync_all().into_diagnostic()?;
+        temporary.persist(&path).map_err(|error| {
+            miette!(
+                "cannot install item mapping report {}: {error}",
+                path.display()
+            )
+        })?;
+    } else {
+        let stdout = std::io::stdout();
+        let mut writer = stdout.lock();
+        writer.write_all(&bytes).into_diagnostic()?;
+        writer.flush().into_diagnostic()?;
+    }
+    Ok(())
+}
+
+fn item_mapping_output_path(
+    path: &Path,
+    source_world: &Path,
+    target_world: &Path,
+    loaded: &rules::LoadedRules,
+) -> miette::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent).map_err(|error| {
+        miette!(
+            "cannot resolve report directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| miette!("report path must name a file"))?;
+    let output = parent.join(name);
+    let resolved = if output.try_exists().into_diagnostic()? {
+        fs::canonicalize(&output).into_diagnostic()?
+    } else {
+        output.clone()
+    };
+    for candidate in [&output, &resolved] {
+        if candidate.starts_with(source_world)
+            || candidate.starts_with(target_world)
+            || loaded.documents.iter().any(|(path, _)| candidate == path)
+        {
+            return Err(miette!("item mapping report must be outside both input worlds and must not replace a rule document: {}", path.display()));
+        }
+    }
+    Ok(output)
 }
 
 fn run_inference(inputs: &InferInputs) -> miette::Result<()> {

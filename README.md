@@ -168,6 +168,39 @@ block, its block entity, and direct or recursively nested inventory items owned
 by that block entity. It does not scan unrelated regions, entities, or
 standalone NBT files.
 
+## Item identity mapping authoring
+
+Compare every registered source item with a Forge 1.12.2 target catalog, including
+items absent from stored inventories:
+
+```sh
+nix develop -c cargo run -p minecraft-analysis -- rules item-mappings \
+  --rules rules/modpack.yaml \
+  --source-world /worlds/source-1.7.10 \
+  --target-world /worlds/template-1.12.2 \
+  --report item-mappings.json
+```
+
+Built-in profiles own the hardcoded stock item mappings used by conversion, so
+the worksheet contains only non-stock source identities. The command reports
+explicit `target_name` projections, ranked prospective non-stock target matches
+with fixed lexical scores and evidence, and items with no suggestion. Stock
+targets are excluded from suggestions and unmatched items, but an explicit
+modded-to-stock rule retains its declared name, resolved canonical identity, and
+numeric ID. Every non-stock target appears under a source mapping or in
+`unmatched_target_items`; explicitly referenced stock targets are also counted
+once in the worksheet target universe. The command leaves both worlds and all
+rule documents unchanged. Omit `--report` for pretty JSON on standard output;
+repeat `--rules` to load additional documents. Forge 1.2.5 modded items require
+a complete source manifest, typically prepared with `rules update-manifest`
+before generating the worksheet.
+
+Review suggestions, author item rules, and regenerate the worksheet. Then use
+`rules coverage` to investigate observed damage, count, NBT, and inventory paths.
+The worksheet measures registry identity relationships and does not establish
+stack coverage. See the [item mapping report guide](docs/item-mapping-report.md)
+for the JSON contract, exact schema-v1 scoring policy, and authoring workflow.
+
 ## Rule coverage authoring
 
 Before choosing a target template, inventory a rule-selected Forge source world for

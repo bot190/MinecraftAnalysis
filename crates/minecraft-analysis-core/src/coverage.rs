@@ -307,10 +307,14 @@ impl<'a> CoverageAccumulator<'a> {
             let associated = association_key(object).and_then(|key| block_entities.get(&key));
             let decision = decide(object, resolved.as_ref(), &kind, self.loaded, associated);
             let built_in = resolved.as_ref().is_some_and(|name| {
-            let source = self.source_catalog.by_name(&kind, name);
-            let vanilla = self.vanilla_catalog.by_name(&kind, name);
-            matches!((source, vanilla), (Some(source), Some(vanilla)) if source.numeric_id == vanilla.numeric_id && object.numeric_id.is_none_or(|id| id == vanilla.numeric_id))
-        });
+                if kind == RegistryKind::Item {
+                    crate::profile::WorldProfile::from(self.loaded.source_profile).is_stock_item(name)
+                } else {
+                    let source = self.source_catalog.by_name(&kind, name);
+                    let vanilla = self.vanilla_catalog.by_name(&kind, name);
+                    matches!((source, vanilla), (Some(source), Some(vanilla)) if source.numeric_id == vanilla.numeric_id && object.numeric_id.is_none_or(|id| id == vanilla.numeric_id))
+                }
+            });
             if built_in || decision.selected_rule.is_some() {
                 self.covered += 1;
                 continue;
